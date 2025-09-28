@@ -53,27 +53,10 @@ def load_data(_gspread_client):
         all_data = page.get_all_values()
         df = pd.DataFrame(all_data[1:], columns=all_data[0])
 
-        # Limpeza e pré-processing
         value_cols = ['Valor', 'Valor Rec.', 'Valor fechamento', 'Valor rec. fechamento']
-
-        # 🎯 CORREÇÃO DEFINITIVA DOS VALORES
         for col in value_cols:
-            if col in df.columns:
-                # Converter para string e limpar
-                df[col] = df[col].astype(str)
-                
-                # Remover R$, espaços e pontos de MILHAR
-                df[col] = df[col].str.replace('R$', '', regex=False)
-                df[col] = df[col].str.replace('.', '', regex=False)  # Remove pontos (1.000 -> 1000)
-                df[col] = df[col].str.replace(',', '.', regex=False)  # Troca vírgula por ponto (1000,50 -> 1000.50)
-                df[col] = df[col].str.strip()
-                
-                # Converter para numérico
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-                
-                # 🚨 CORREÇÃO: Se o valor está claramente inflado (ex: 595935 em vez de 5959.35), divide por 100
-                if not df[col].empty and df[col].iloc[0] > 100000:  # Se o primeiro valor é maior que 100 mil
-                    df[col] = df[col] / 100
+            df[col] = df[col].astype(str).str.replace('R$', '', regex=False).str.replace(',', '', regex=False).str.strip()
+            df[col] = pd.to_numeric(df[col], errors='coerce')
 
         date_cols = ['Data de abertura', 'Data fechamento']
         for col in date_cols:
@@ -91,9 +74,6 @@ def load_data(_gspread_client):
             return None
 
         df['OC_Identifier'] = df['Título'].apply(extract_oc_identifier)
-
-        # 🎯 CORREÇÃO: REMOVER DUPLICATAS
-        df = df.sort_values('Data de abertura', ascending=False).drop_duplicates(subset=['OC_Identifier'], keep='first')
 
         df['Mes de Abertura'] = df['Data de abertura'].dt.month.fillna(0).astype(int) if pd.api.types.is_datetime64_any_dtype(df['Data de abertura']) else 0
         df['Ano de Abertura'] = df['Data de abertura'].dt.year.fillna(0).astype(int) if pd.api.types.is_datetime64_any_dtype(df['Data de abertura']) else 0
@@ -182,35 +162,6 @@ if st.session_state['authenticated']:
 
 # Main app logic
 try:
-    # --- 🔍 DETETIVE DE DUPLICATAS ---
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🔍 Detetive de Dados")
-    
-    if not df.empty:
-        total_registros = len(df)
-        oportunidades_unicas = df['OC_Identifier'].nunique()
-        duplicatas = total_registros - oportunidades_unicas
-        
-        st.sidebar.write(f"📊 Total registros: {total_registros}")
-        st.sidebar.write(f"🎯 Oportunidades únicas: {oportunidades_unicas}")
-        st.sidebar.write(f"⚠️ Registros duplicados: {duplicatas}")
-        
-        # Verificar valores
-        if 'Valor' in df.columns:
-            valor_maximo = df['Valor'].max()
-            valor_medio = df['Valor'].mean()
-            st.sidebar.write(f"💰 Valor máximo: R$ {valor_maximo:,.2f}")
-            st.sidebar.write(f"💰 Valor médio: R$ {valor_medio:,.2f}")
-            
-            # 🚨 Alerta se valores parecem inflados
-            if valor_maximo > 10000000:  # Mais de 10 milhões
-                st.sidebar.error("🚨 Valores podem estar inflados!")
-        
-        if duplicatas > 0:
-            st.sidebar.error("🚨 TEMOS DUPLICATAS!")
-        else:
-            st.sidebar.success("✅ Sem duplicatas!")
-
     if page == "Login":
         st.title("Login")
         st.markdown("Por favor, insira suas credenciais para acessar o painel.")
@@ -328,19 +279,21 @@ try:
                 if selected_opportunity_identifier_general != 'Todos':
                      filtered_df = filtered_df[filtered_df['OC_Identifier'] == selected_opportunity_identifier_general].copy()
 
-                # 🎯 CORREÇÃO: USAR DADOS SEM DUPLICATAS EM TODOS OS CÁLCULOS
-                filtered_df_unique = filtered_df.drop_duplicates(subset=['OC_Identifier'])
+                df_agg_responsavel_count = filtered_df.groupby('Responsável')['OC_Identifier'].nunique().reset_index()
+                df_agg_responsavel_count.rename(columns={'OC_Identifier': 'Unique Opportunity Count'}, inplace=True)
+
+                df_agg_estado_mes_count = filtered_df.groupby(['Estado', 'MonthYear_Abertura'])['OC_Identifier'].nunique().reset_index()
+                df_agg_estado_mes_count.rename(columns={'OC_Identifier': 'Unique Opportunity Count'}, inplace=True)
+                df_agg_estado_mes_count['MonthYear_Abertura'] = df_agg_estado_mes_count['MonthYear_Abertura'].astype(str)
+
+                ganha_df_filtered = filtered_df[filtered_df['Estado'] == 'Ganha'].copy()
 
                 st.subheader("Resumo Geral")
                 col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
 
-                total_opportunities = filtered_df_unique['OC_Identifier'].nunique() if not filtered_df_unique.empty else 0
-                ganha_df_filtered = filtered_df_unique[filtered_df_unique['Estado'] == 'Ganha'].copy()
+                total_opportunities = filtered_df['OC_Identifier'].nunique() if not filtered_df.empty else 0
                 total_won_value = ganha_df_filtered['Valor'].sum() if not ganha_df_filtered.empty else 0
                 win_rate = (len(ganha_df_filtered) / total_opportunities * 100) if total_opportunities > 0 else 0
-                
-                # 🚨 CORREÇÃO: Nunca mais que 100%
-                win_rate = min(win_rate, 100)
 
                 col_kpi1.metric("Total Oportunidades Únicas", total_opportunities)
                 col_kpi2.metric("Valor Total Ganho", f"R$ {total_won_value:,.2f}")
@@ -351,10 +304,6 @@ try:
 
                 with col1:
                     st.subheader("Quantidade de Oportunidades Únicas por Responsável")
-                    # 🎯 CORREÇÃO: Usar dados SEM duplicatas
-                    df_agg_responsavel_count = filtered_df_unique.groupby('Responsável')['OC_Identifier'].nunique().reset_index()
-                    df_agg_responsavel_count.rename(columns={'OC_Identifier': 'Unique Opportunity Count'}, inplace=True)
-
                     if not df_agg_responsavel_count.empty:
                         fig1 = px.bar(df_agg_responsavel_count, x='Responsável', y='Unique Opportunity Count',
                                       title='Quantidade de Oportunidades Únicas por Responsável',
@@ -367,15 +316,14 @@ try:
 
                         if selected_points:
                             selected_responsaveis_chart = [p['x'] for p in selected_points]
-                            filtered_df_chart_selection = filtered_df_unique[filtered_df_unique['Responsável'].isin(selected_responsaveis_chart)].copy()
+                            filtered_df_chart_selection = filtered_df[filtered_df['Responsável'].isin(selected_responsaveis_chart)].copy()
                         else:
-                            filtered_df_chart_selection = filtered_df_unique.copy()
+                            filtered_df_chart_selection = filtered_df.copy()
                     else:
                         st.info("Nenhum dado disponível para 'Quantidade de Oportunidades Únicas por Responsável' com os filtros selecionados.")
-                        filtered_df_chart_selection = filtered_df_unique.copy()
+                        filtered_df_chart_selection = filtered_df.copy()
 
                 with col2:
-                    # 🎯 CORREÇÃO: Usar dados SEM duplicatas
                     df_agg_estado_mes_count_filtered = filtered_df_chart_selection.groupby(['Estado', 'MonthYear_Abertura'])['OC_Identifier'].nunique().reset_index()
                     df_agg_estado_mes_count_filtered.rename(columns={'OC_Identifier': 'Unique Opportunity Count'}, inplace=True)
                     df_agg_estado_mes_count_filtered['MonthYear_Abertura'] = df_agg_estado_mes_count_filtered['MonthYear_Abertura'].astype(str)
@@ -393,7 +341,6 @@ try:
                     else:
                         st.info("Nenhum dado disponível para 'Quantidade de Negócios Únicos por Estado e Mês de Abertura' com os filtros selecionados.")
 
-                # Resto do código do Heatmap permanece similar...
                 st.subheader("Heatmap: Oportunidades por Etapa e Hora de Abertura")
                 if not df_timeline.empty:
                     df_timeline_filtered_for_heatmap = df_timeline[(df_timeline['Data de abertura'] >= start_datetime) & (df_timeline['Data de abertura'] <= end_datetime)].copy()
@@ -493,11 +440,7 @@ try:
                 else:
                     st.info("Dados de timeline não disponíveis.")
 
-            else:
-                st.warning("Nenhum dado disponível para exibir.")
-
         elif page == "Relatório de Oportunidade":
-            # ... (código do Relatório de Oportunidade permanece igual) ...
             st.title("Relatório de Oportunidade Individual")
 
             st.markdown("""
@@ -690,7 +633,7 @@ try:
                                                                 {"role": "system", "content": "Você é um assistente de BI útil e conciso."},
                                                                 {"role": "user", "content": prompt}
                                                             ],
-                                                            max_tokens=1000
+                                                            max_tokens=300
                                                         )
                                                         st.session_state['ai_response'] = response.choices[0].message.content
                                                     except Exception as e:
