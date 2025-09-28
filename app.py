@@ -7,7 +7,7 @@ import pandas as pd
 import re
 import plotly.express as px
 import plotly.graph_objects as go
-# from streamlit_plotly_events import plotly_events  # COMENTE ESTA LINHA
+from streamlit_plotly_events import plotly_events
 import base64
 from fpdf import FPDF
 
@@ -808,5 +808,3 @@ try:
 except Exception as e:
     st.error(f"Ocorreu um erro geral na aplicação: {e}")
     st.stop()
-
-
