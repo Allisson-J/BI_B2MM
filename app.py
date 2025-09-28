@@ -808,3 +808,4 @@ try:
 except Exception as e:
     st.error(f"Ocorreu um erro geral na aplicação: {e}")
     st.stop()
+
