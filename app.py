@@ -634,14 +634,15 @@ try:
                                     if not opportunity_timeline.empty:
                                         st.subheader("Linha do Tempo da Oportunidade")
 
-                                        # --- NOVA SEÇÃO: Visualização Gráfica da Linha do Tempo ---
-                                        st.markdown("#### 📊 Visualização Gráfica da Linha do Tempo")
+                                        # --- ABORDAGEM 1: Gráfico de Gantt para Visualização de Cronograma ---
+                                        st.markdown("#### 📊 Gráfico de Gantt - Linha do Tempo dos Estágios")
                                         
                                         # Preparar dados para o gráfico de Gantt
                                         gantt_data = opportunity_timeline.copy()
                                         gantt_data['Start'] = gantt_data['Data de abertura']
                                         gantt_data['Finish'] = gantt_data['Data fechamento'].fillna(pd.Timestamp.now())
                                         gantt_data['Task'] = gantt_data['Estágio']
+                                        gantt_data['Duration_Hours'] = gantt_data['Time_in_Stage']
                                         
                                         # Criar gráfico de Gantt
                                         fig_gantt = px.timeline(
@@ -657,39 +658,120 @@ try:
                                         fig_gantt.update_layout(
                                             xaxis_title="Data",
                                             yaxis_title="Estágio",
-                                            height=400
+                                            height=400,
+                                            showlegend=True
                                         )
                                         
+                                        # Inverter a ordem do eixo Y para melhor visualização
+                                        fig_gantt.update_yaxes(autorange="reversed")
+                                        
                                         st.plotly_chart(fig_gantt, use_container_width=True)
+
+                                        # --- ABORDAGEM 2: Gráfico de Linha para Evolução Temporal ---
+                                        st.markdown("#### 📈 Evolução Temporal dos Estágios")
+                                        
+                                        # Preparar dados para gráfico de linha
+                                        # Ordenar por data de abertura para sequência correta
+                                        line_data = opportunity_timeline.sort_values('Data de abertura').copy()
+                                        line_data['Sequence'] = range(1, len(line_data) + 1)
+                                        
+                                        fig_line = px.line(
+                                            line_data,
+                                            x='Data de abertura',
+                                            y='Sequence',
+                                            markers=True,
+                                            title=f"Progressão dos Estágios - {selected_opportunity_identifier}",
+                                            color='Estágio',
+                                            color_discrete_sequence=px.colors.qualitative.Bold
+                                        )
+                                        
+                                        # Adicionar anotações para cada estágio
+                                        for idx, row in line_data.iterrows():
+                                            fig_line.add_annotation(
+                                                x=row['Data de abertura'],
+                                                y=row['Sequence'],
+                                                text=row['Estágio'],
+                                                showarrow=True,
+                                                arrowhead=2,
+                                                arrowsize=1,
+                                                arrowwidth=2,
+                                                ax=0,
+                                                ay=-40
+                                            )
+                                        
+                                        fig_line.update_layout(
+                                            xaxis_title="Data",
+                                            yaxis_title="Sequência de Estágios",
+                                            height=400,
+                                            showlegend=False
+                                        )
+                                        
+                                        fig_line.update_yaxes(tickvals=line_data['Sequence'], ticktext=line_data['Estágio'])
+                                        
+                                        st.plotly_chart(fig_line, use_container_width=True)
 
                                         # --- Gráfico de Barras do Tempo em Cada Estágio ---
                                         st.markdown("#### ⏱️ Tempo Gasto em Cada Estágio")
                                         
                                         # Calcular tempo em horas para cada estágio
-                                        gantt_data['Tempo_Horas'] = (gantt_data['Finish'] - gantt_data['Start']).dt.total_seconds() / 3600
+                                        time_per_stage = opportunity_timeline.groupby('Estágio')['Time_in_Stage'].sum().reset_index()
+                                        time_per_stage = time_per_stage.sort_values('Time_in_Stage', ascending=True)
                                         
                                         fig_tempo = px.bar(
-                                            gantt_data,
-                                            x='Tempo_Horas',
-                                            y='Task',
+                                            time_per_stage,
+                                            x='Time_in_Stage',
+                                            y='Estágio',
                                             orientation='h',
-                                            title="Tempo Gasto por Estágio (Horas)",
-                                            color='Task',
-                                            color_discrete_sequence=px.colors.qualitative.Pastel
+                                            title="Tempo Total por Estágio (Horas)",
+                                            color='Estágio',
+                                            color_discrete_sequence=px.colors.qualitative.Pastel,
+                                            text='Time_in_Stage'
+                                        )
+                                        
+                                        # Formatando o texto para mostrar horas de forma legível
+                                        fig_tempo.update_traces(
+                                            texttemplate='%{x:.1f}h',
+                                            textposition='outside'
                                         )
                                         
                                         fig_tempo.update_layout(
-                                            xaxis_title="Tempo (Horas)",
+                                            xaxis_title="Tempo Total (Horas)",
                                             yaxis_title="Estágio",
-                                            height=300
+                                            height=400,
+                                            showlegend=False
                                         )
                                         
                                         st.plotly_chart(fig_tempo, use_container_width=True)
 
-                                        # Display timeline table
+                                        # --- Tabela Detalhada da Linha do Tempo ---
                                         st.markdown("#### 📋 Detalhes da Linha do Tempo")
-                                        display_timeline_cols = ['Estágio', 'Data de abertura', 'Data fechamento', 'Time_in_Stage_Formatted']
-                                        st.dataframe(opportunity_timeline[display_timeline_cols], key=f"timeline_data_{selected_opportunity_identifier}")
+                                        
+                                        # Preparar dados para exibição
+                                        display_timeline = opportunity_timeline.copy()
+                                        display_timeline['Data de abertura'] = display_timeline['Data de abertura'].dt.strftime('%d/%m/%Y %H:%M')
+                                        display_timeline['Data fechamento'] = display_timeline['Data fechamento'].apply(
+                                            lambda x: x.strftime('%d/%m/%Y %H:%M') if pd.notna(x) else 'Em andamento'
+                                        )
+                                        
+                                        # Calcular duração em formato mais legível
+                                        def format_duration_hours(hours):
+                                            if pd.isna(hours):
+                                                return "N/A"
+                                            days = int(hours // 24)
+                                            remaining_hours = hours % 24
+                                            if days > 0:
+                                                return f"{days}d {remaining_hours:.1f}h"
+                                            else:
+                                                return f"{remaining_hours:.1f}h"
+                                        
+                                        display_timeline['Duração'] = display_timeline['Time_in_Stage'].apply(format_duration_hours)
+                                        
+                                        display_cols = ['Estágio', 'Data de abertura', 'Data fechamento', 'Duração']
+                                        st.dataframe(
+                                            display_timeline[display_cols],
+                                            use_container_width=True,
+                                            hide_index=True
+                                        )
                                         
                                     else:
                                         st.info(f"Nenhum dado de linha do tempo encontrado para: {selected_opportunity_identifier}")
@@ -705,13 +787,22 @@ try:
 
                                 if client:
                                     user_query = st.text_area(f"Faça uma pergunta sobre a oportunidade {selected_opportunity_identifier}:", height=100, key='user_query')
-                                    col_ai_button1, col_ai_button2, col_ai_button3 = st.columns(3)  # Adicionado terceiro botão
+                                    col_ai_button1, col_ai_button2, col_ai_button3 = st.columns(3)
 
                                     with col_ai_button1:
                                         if st.button("Obter Resposta da IA", use_container_width=True):
                                             if user_query:
                                                 with st.spinner("Obtendo resposta da IA..."):
                                                     try:
+                                                        # Preparar resumo da linha do tempo para o prompt
+                                                        timeline_summary = ""
+                                                        if not opportunity_timeline.empty:
+                                                            for _, stage in opportunity_timeline.iterrows():
+                                                                start_date = stage['Data de abertura'].strftime('%d/%m/%Y %H:%M')
+                                                                end_date = stage['Data fechamento'].strftime('%d/%m/%Y %H:%M') if pd.notna(stage['Data fechamento']) else 'Em andamento'
+                                                                duration = format_duration_hours(stage['Time_in_Stage'])
+                                                                timeline_summary += f"- {stage['Estágio']}: {start_date} até {end_date} ({duration})\n"
+
                                                         prompt = f"""
                                                         Você é um assistente de BI focado em analisar dados de oportunidades de negócios.
                                                         Sua tarefa é responder a perguntas sobre uma oportunidade específica com base nos dados fornecidos.
@@ -741,7 +832,7 @@ try:
                                                         - Observação de Fechamento: {opportunity_details.get('Observação de fechamento', 'N/A')}
 
                                                         Linha do Tempo (Estágios e Tempos):
-                                                        {opportunity_timeline[['Estágio', 'Data de abertura', 'Data fechamento', 'Time_in_Stage_Formatted']].to_string(index=False)}
+                                                        {timeline_summary}
 
                                                         Pergunta do Usuário: {user_query}
 
@@ -820,15 +911,15 @@ try:
                                                     pdf.cell(60, 8, "Estágio", border=1)
                                                     pdf.cell(45, 8, "Data Abertura", border=1)
                                                     pdf.cell(45, 8, "Data Fechamento", border=1)
-                                                    pdf.cell(40, 8, "Tempo", border=1)
+                                                    pdf.cell(40, 8, "Duração", border=1)
                                                     pdf.ln()
                                                     
                                                     # Dados da tabela
-                                                    for _, row in opportunity_timeline.iterrows():
+                                                    for _, row in display_timeline.iterrows():
                                                         pdf.cell(60, 8, str(row['Estágio']), border=1)
-                                                        pdf.cell(45, 8, row['Data de abertura'].strftime('%d/%m/%Y') if pd.notna(row['Data de abertura']) else 'N/A', border=1)
-                                                        pdf.cell(45, 8, row['Data fechamento'].strftime('%d/%m/%Y') if pd.notna(row['Data fechamento']) else 'Em andamento', border=1)
-                                                        pdf.cell(40, 8, str(row['Time_in_Stage_Formatted']), border=1)
+                                                        pdf.cell(45, 8, row['Data de abertura'], border=1)
+                                                        pdf.cell(45, 8, row['Data fechamento'], border=1)
+                                                        pdf.cell(40, 8, str(row['Duração']), border=1)
                                                         pdf.ln()
                                                 
                                                 pdf.ln(10)
@@ -890,6 +981,3 @@ try:
 
                 except Exception as e:
                     st.error(f"Erro ao processar identificadores de oportunidade: {e}")
-
-except Exception as e:
-    st.error(f"Ocorreu um erro geral na aplicação: {e}")
