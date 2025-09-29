@@ -42,8 +42,8 @@ else:
     st.warning("⚠️ OpenAI API key not found. OpenAI features will be disabled.")
     client = None
 
-@st.cache_data # Cache the data loading for performance (removed allow_output_mutation=True)
-def load_data(_gspread_client): # Added underscore to prevent hashing
+@st.cache_data
+def load_data(_gspread_client):
     """Loads data from Google Sheet using the provided gspread client."""
     if _gspread_client is None:
         st.warning("Cliente gspread não disponível. Não foi possível carregar os dados.")
@@ -80,7 +80,6 @@ def load_data(_gspread_client): # Added underscore to prevent hashing
 
         df['OC_Identifier'] = df['Título'].apply(extract_oc_identifier)
 
-
         # Transformation and Feature Engineering for BI
         # Ensure date columns are not NaT before accessing dt properties
         df['Mes de Abertura'] = df['Data de abertura'].dt.month.fillna(0).astype(int) if pd.api.types.is_datetime64_any_dtype(df['Data de abertura']) else 0
@@ -93,10 +92,7 @@ def load_data(_gspread_client): # Added underscore to prevent hashing
         df['MonthYear_Fechamento'] = df['Data fechamento'].dt.to_period('M') if pd.api.types.is_datetime64_any_dtype(df['Data fechamento']) else None
 
         # Extract Hour of Day from 'Data de abertura'
-        # Ensure 'Data de abertura' is not NaT before extracting hour
-        # Only extract hour if Data de abertura is a valid datetime
         df['Hour_of_Day_Abertura'] = df['Data de abertura'].apply(lambda x: x.hour if pd.notna(x) else -1).astype(int)
-
 
         # Calculate Time in Stage for timeline analysis using OC_Identifier
         df_timeline = df[['OC_Identifier', 'Estágio', 'Data de abertura', 'Data fechamento']].copy()
@@ -125,13 +121,11 @@ def load_data(_gspread_client): # Added underscore to prevent hashing
 
         df_timeline['Time_in_Stage_Formatted'] = df_timeline['Time_in_Stage'].apply(format_time_in_stage)
 
-
         return df, df_timeline
 
     except Exception as e:
         st.error(f"Erro ao carregar dados do Google Sheet: {e}")
         return pd.DataFrame(), pd.DataFrame() # Return empty dataframes on error
-
 
 # Load data (pass the gc client)
 df, df_timeline = load_data(gc)
@@ -146,7 +140,6 @@ df_interaction = pd.DataFrame(interaction_data)
 
 # Aggregate interaction data by user
 df_agg_interaction = df_interaction.groupby('User')['Interactions'].sum().reset_index()
-
 
 # --- Authentication Logic ---
 # Initialize session state for authentication
@@ -167,7 +160,6 @@ st.sidebar.title("Navegação")
 # Determine the current page based on authentication status and sidebar selection
 if st.session_state['authenticated']:
     # If authenticated, show all pages in the sidebar radio
-    # Initialize the page in session state if not set, default to "Página Inicial"
     if 'page' not in st.session_state:
         st.session_state['page'] = "Página Inicial"
 
@@ -186,13 +178,11 @@ else:
     page = "Login"
     st.session_state['page'] = "Login" # Ensure session state reflects the login page
 
-
 # --- Refresh Button (only show if authenticated) ---
 if st.session_state['authenticated']:
     if st.sidebar.button("Atualizar Dados"):
         st.cache_data.clear() # Clear the cache for load_data
         st.rerun() # Rerun the app to load fresh data
-
 
 # Main app logic within a try-except block for general errors
 try:
@@ -277,7 +267,6 @@ try:
                 Sinta-se à vontade para entrar em contato para feedback, sugestões ou colaboração.
             """)
 
-
         elif page == "Painel Geral":
             # --- Painel Geral ---
             st.title("Painel de BI Operacional - Geral")
@@ -308,7 +297,6 @@ try:
                 else:
                     filtered_df = df.copy() # If date column is empty, use the original df
 
-
                 # Filter by Estado
                 selected_estados = st.sidebar.multiselect("Selecionar Estado:", filtered_df['Estado'].unique(), filtered_df['Estado'].unique())
                 filtered_df = filtered_df[filtered_df['Estado'].isin(selected_estados)]
@@ -331,18 +319,15 @@ try:
                 if selected_opportunity_identifier_general != 'Todos':
                      filtered_df = filtered_df[filtered_df['OC_Identifier'] == selected_opportunity_identifier_general].copy()
 
-
                 # Agregações para visualizações (using filtered_df)
                 # Aggregate to count unique OC_Identifier per Responsável
                 df_agg_responsavel_count = filtered_df.groupby('Responsável')['OC_Identifier'].nunique().reset_index()
                 df_agg_responsavel_count.rename(columns={'OC_Identifier': 'Unique Opportunity Count'}, inplace=True)
 
-
                 # Aggregate to count unique OC_Identifier per Estado and MonthYear_Abertura
                 df_agg_estado_mes_count = filtered_df.groupby(['Estado', 'MonthYear_Abertura'])['OC_Identifier'].nunique().reset_index()
                 df_agg_estado_mes_count.rename(columns={'OC_Identifier': 'Unique Opportunity Count'}, inplace=True)
                 df_agg_estado_mes_count['MonthYear_Abertura'] = df_agg_estado_mes_count['MonthYear_Abertura'].astype(str) # Convert to string for plotting
-
 
                 # Filter for 'Ganha' deals for specific visualizations
                 ganha_df_filtered = filtered_df[filtered_df['Estado'] == 'Ganha'].copy()
@@ -355,11 +340,9 @@ try:
                 total_won_value = ganha_df_filtered['Valor'].sum() if not ganha_df_filtered.empty else 0
                 win_rate = (len(ganha_df_filtered) / total_opportunities * 100) if total_opportunities > 0 else 0
 
-
                 col_kpi1.metric("Total Oportunidades Únicas", total_opportunities)
                 col_kpi2.metric("Valor Total Ganho", f"R$ {total_won_value:,.2f}")
                 col_kpi3.metric("Taxa de Sucesso", f"{win_rate:.2f}%")
-
 
                 # --- Visualizations ---
                 st.subheader("Análise de Oportunidades e Valor")
@@ -392,7 +375,6 @@ try:
                         st.info("Nenhum dado disponível para 'Quantidade de Oportunidades Únicas por Responsável' com os filtros selecionados.")
                         filtered_df_chart_selection = filtered_df.copy() # Use sidebar filtered data if no chart data
 
-
                 with col2:
                      # Recalculate aggregated data based on chart selection
                      df_agg_estado_mes_count_filtered = filtered_df_chart_selection.groupby(['Estado', 'MonthYear_Abertura'])['OC_Identifier'].nunique().reset_index()
@@ -421,7 +403,7 @@ try:
                     df_timeline_filtered_for_heatmap = df_timeline[(df_timeline['Data de abertura'] >= start_datetime) & (df_timeline['Data de abertura'] <= end_datetime)].copy()
 
                     # Further filter timeline data based on chart selection and Estado/Estágio filters
-                    if selected_points and selected_points.selection and selected_points.selection.points:
+                    if selected_points:
                          selected_oc_identifiers_chart = filtered_df_chart_selection['OC_Identifier'].unique()
                          df_timeline_filtered_for_heatmap = df_timeline_filtered_for_heatmap[df_timeline_filtered_for_heatmap['OC_Identifier'].isin(selected_oc_identifiers_chart)].copy()
                     df_timeline_filtered_for_heatmap = df_timeline_filtered_for_heatmap[df_timeline_filtered_for_heatmap['Estágio'].isin(selected_estagios)].copy()
@@ -429,7 +411,6 @@ try:
                     # Filter heatmap data by selected OC_Identifier for the general dashboard
                     if selected_opportunity_identifier_general != 'Todos':
                          df_timeline_filtered_for_heatmap = df_timeline_filtered_for_heatmap[df_timeline_filtered_for_heatmap['OC_Identifier'] == selected_opportunity_identifier_general].copy()
-
 
                     # Aggregate data for the heatmap (count unique OC_Identifier per Estágio and Hour_of_Day_Abertura)
                     # Ensure 'Hour_of_Day_Abertura' is extracted for the filtered timeline data
@@ -459,25 +440,11 @@ try:
                 else:
                      st.info("Dados de timeline não disponíveis para o Heatmap.")
 
-
                 # Another row for the distribution plots
                 st.subheader("Análise de Estágios")
                 # Use a single column for the remaining distribution plot after removing one
                 col5, = st.columns(1)
 
-                # Removed the "Distribuição do Valor para Negócios Ganhos" chart
-                # with col5:
-                #      if not ganha_df_filtered.empty:
-                #          st.subheader("Distribuição do Valor para Negócios Ganhos (Filtered)")
-                #          fig3 = px.histogram(ganha_df_filtered, x='Valor', nbins=50,
-                #                              title='Distribuição do Valor para Negócios Ganhos',
-                #                              color_discrete_sequence=['indianred'],
-                #                              template='plotly_white')
-                #          st.plotly_chart(fig3, use_container_width=True)
-                #      else:
-                #          st.info("Nenhum dado disponível para visualizações de Negócios Ganhos com os filtros selecionados.")
-
-                # Shift the second plot to the single column (col5)
                 with col5:
                     if not filtered_df_chart_selection.empty:
                         # Distribution of all stages (not just 'Ganha') with improved style and colors
@@ -495,7 +462,6 @@ try:
                     else:
                         st.info("Nenhum dado disponível para 'Distribuição de Todos os Estágios' com os filtros selecionados.")
 
-
                 # Final row for the timeline analysis metrics
                 st.subheader("Análise de Tempo Médio por Estágio (Filtered)")
                 if not df_timeline.empty:
@@ -503,7 +469,7 @@ try:
                     df_timeline_filtered = df_timeline[(df_timeline['Data de abertura'] >= start_datetime) & (df_timeline['Data de abertura'] <= end_datetime)].copy()
 
                     # Further filter timeline data based on chart selection and Estado/Estágio filters
-                    if selected_points and selected_points.selection and selected_points.selection.points:
+                    if selected_points:
                          # Filter timeline data based on selected OC_Identifiers from the chart selection
                          selected_oc_identifiers_chart = filtered_df_chart_selection['OC_Identifier'].unique()
                          df_timeline_filtered = df_timeline_filtered[df_timeline_filtered['OC_Identifier'].isin(selected_oc_identifiers_chart)].copy()
@@ -512,7 +478,6 @@ try:
                     # Filter timeline data by selected OC_Identifier for the general dashboard
                     if selected_opportunity_identifier_general != 'Todos':
                          df_timeline_filtered = df_timeline_filtered[df_timeline_filtered['OC_Identifier'] == selected_opportunity_identifier_general].copy()
-
 
                     if not df_timeline_filtered.empty:
                         df_agg_time_per_stage_avg = df_timeline_filtered.groupby('Estágio')['Time_in_Stage'].mean().reset_index()
@@ -530,7 +495,6 @@ try:
                             return f"{days} days, {hours} hours, {minutes} minutes"
 
                         df_agg_time_per_stage_avg['Average Time in Stage'] = df_agg_time_per_stage_avg['Time_in_Stage'].apply(format_time_in_stage)
-
 
                         st.write("Tempo Médio em Cada Estágio:")
                         st.dataframe(df_agg_time_per_stage_avg[['Estágio', 'Average Time in Stage']])
@@ -550,7 +514,6 @@ try:
                          st.info("Nenhum dado disponível para Análise de Tempo Médio por Estágio com os filtros selecionados.")
                 else:
                     st.info("Dados de timeline não disponíveis.")
-
 
         elif page == "Relatório de Oportunidade":
             # --- Relatório de Oportunidade Individual ---
@@ -981,3 +944,6 @@ try:
 
                 except Exception as e:
                     st.error(f"Erro ao processar identificadores de oportunidade: {e}")
+
+except Exception as e:
+    st.error(f"Ocorreu um erro geral na aplicação: {e}")
