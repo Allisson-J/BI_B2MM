@@ -7,6 +7,7 @@ import pandas as pd
 import re
 import plotly.express as px
 import plotly.graph_objects as go
+from streamlit_plotly_events import plotly_events
 
 # --- Google Sheets ---
 try:
@@ -35,11 +36,11 @@ st.set_page_config(layout="wide", page_title="Painel de BI Operacional")
 openai_api_key = os.getenv("OPENAI_API_KEY") or st.secrets["openai"]["api_key"]
 
 if openai_api_key:
-    import openai
-    openai.api_key = openai_api_key
-    client = openai.OpenAI(api_key=openai_api_key)
+    from openai import OpenAI
+    client = OpenAI(api_key=openai_api_key)
 else:
     st.warning("⚠️ OpenAI API key not found. OpenAI features will be disabled.")
+    client = None
 
 @st.cache_data # Cache the data loading for performance (removed allow_output_mutation=True)
 def load_data(_gspread_client): # Added underscore to prevent hashing
@@ -379,16 +380,13 @@ try:
                         fig1.update_layout(xaxis_title="Responsável", yaxis_title="Contagem Única de Oportunidades") # Improved axis titles
 
                         # Capture selection - Keep for potential filtering later
-                        selected_points = st.plotly_chart(fig1, use_container_width=True, on_select="rerun")
+                        selected_points = plotly_events(fig1, select_event=True)
 
-                        # Filter based on selection (using the original filtered_df and the selection from the chart)
-                        # This filtering logic is already in place in the original code, so we keep it.
-                        if selected_points and selected_points.selection and selected_points.selection.points:
-                             selected_responsaveis_chart = [point['x'] for point in selected_points.selection.points]
-                             # Apply filtering to the original filtered_df based on chart selection
-                             filtered_df_chart_selection = filtered_df[filtered_df['Responsável'].isin(selected_responsaveis_chart)].copy()
+                        if selected_points:
+                            selected_responsaveis_chart = [p['x'] for p in selected_points]
+                            filtered_df_chart_selection = filtered_df[filtered_df['Responsável'].isin(selected_responsaveis_chart)].copy()
                         else:
-                             filtered_df_chart_selection = filtered_df.copy() # Use sidebar filtered data if no chart selection
+                            filtered_df_chart_selection = filtered_df.copy()
 
                     else:
                         st.info("Nenhum dado disponível para 'Quantidade de Oportunidades Únicas por Responsável' com os filtros selecionados.")
@@ -555,188 +553,341 @@ try:
 
 
         elif page == "Relatório de Oportunidade":
-            # --- Relatório de Oportunidade Individual ---
-            st.title("Relatório de Oportunidade Individual")
+        # --- Relatório de Oportunidade Individual ---
+        st.title("Relatório de Oportunidade Individual")
 
-            st.markdown("""
-            Selecione um identificador de Oportunidade (OC + Número ou CTE + Número)
-            para visualizar sua linha do tempo e detalhes.
-            """)
+        st.markdown("""
+        Selecione um identificador de Oportunidade (OC + Número ou CTE + Número)
+        para visualizar sua linha do tempo e detalhes.
+        """)
 
-            # Error handling for empty df or df_timeline
-            if df.empty or df_timeline.empty:
-                st.warning("Dados de oportunidade ou linha do tempo não disponíveis. Por favor, verifique a conexão com o Google Sheet.")
-            else:
-                try:
-                    # Use OC_Identifier for selection
-                    opportunity_identifiers = df['OC_Identifier'].dropna().unique()
+        # Error handling for empty df or df_timeline
+        if df.empty or df_timeline.empty:
+            st.warning("Dados de oportunidade ou linha do tempo não disponíveis. Por favor, verifique a conexão com o Google Sheet.")
+        else:
+            try:
+                # Use OC_Identifier for selection
+                opportunity_identifiers = df['OC_Identifier'].dropna().unique()
 
-                    if len(opportunity_identifiers) == 0:
-                        st.info("Nenhum identificador de oportunidade único encontrado nos dados.")
-                    else:
-                        selected_opportunity_identifier = st.selectbox("Selecionar Oportunidade (OC + Número ou CTE + Número):", opportunity_identifiers)
+                if len(opportunity_identifiers) == 0:
+                    st.info("Nenhum identificador de oportunidade único encontrado nos dados.")
+                else:
+                    selected_opportunity_identifier = st.selectbox("Selecionar Oportunidade (OC + Número ou CTE + Número):", opportunity_identifiers)
 
-                        st.subheader(f"Detalhes e Linha do Tempo para: {selected_opportunity_identifier}")
+                    st.subheader(f"Detalhes e Linha do Tempo para: {selected_opportunity_identifier}")
 
-                        try:
-                            # Filter main df for the selected opportunity identifier
-                            opportunity_details_df = df[df['OC_Identifier'] == selected_opportunity_identifier]
+                    try:
+                        # Filter main df for the selected opportunity identifier
+                        opportunity_details_df = df[df['OC_Identifier'] == selected_opportunity_identifier]
 
-                            if opportunity_details_df.empty:
-                                st.warning(f"Nenhum detalhe encontrado para: {selected_opportunity_identifier} no DataFrame principal.")
-                            else:
-                                opportunity_details = opportunity_details_df.iloc[0]
+                        if opportunity_details_df.empty:
+                            st.warning(f"Nenhum detalhe encontrado para: {selected_opportunity_identifier} no DataFrame principal.")
+                        else:
+                            opportunity_details = opportunity_details_df.iloc[0]
 
-                                # Use columns for a structured layout
-                                col_info1, col_info2 = st.columns(2)
+                            # Use columns for a structured layout
+                            col_info1, col_info2 = st.columns(2)
 
-                                with col_info1:
-                                    st.write("**ID:**", opportunity_details.get('ID', 'N/A'))
-                                    st.write("**Título:**", opportunity_details.get('Título', 'N/A'))
-                                    st.write("**Responsável:**", opportunity_details.get('Responsável', 'N/A'))
-                                    st.write("**Estado:**", opportunity_details.get('Estado', 'N/A'))
-                                    st.write("**Estágio Atual:**", opportunity_details.get('Estágio', 'N/A')) # Display current stage
+                            with col_info1:
+                                st.write("**ID:**", opportunity_details.get('ID', 'N/A'))
+                                st.write("**Título:**", opportunity_details.get('Título', 'N/A'))
+                                st.write("**Responsável:**", opportunity_details.get('Responsável', 'N/A'))
+                                st.write("**Estado:**", opportunity_details.get('Estado', 'N/A'))
+                                st.write("**Estágio Atual:**", opportunity_details.get('Estágio', 'N/A'))
 
-                                with col_info2:
-                                    # Add error handling for potential non-numeric 'Valor' before formatting
-                                    valor_display = "N/A"
-                                    if pd.notna(opportunity_details.get('Valor')) and pd.api.types.is_numeric_dtype(opportunity_details.get('Valor')):
-                                        valor_display = f"R$ {opportunity_details['Valor']:,.2f}"
-                                    st.write("**Valor:**", valor_display)
+                            with col_info2:
+                                valor_display = "N/A"
+                                if pd.notna(opportunity_details.get('Valor')) and pd.api.types.is_numeric_dtype(opportunity_details.get('Valor')):
+                                    valor_display = f"R$ {opportunity_details['Valor']:,.2f}"
+                                st.write("**Valor:**", valor_display)
 
-                                    st.write("**Origem:**", opportunity_details.get('Origem', 'N/A'))
-                                    st.write("**Prob %:**", opportunity_details.get('Prob %', 'N/A'))
-                                    st.write("**OC:**", opportunity_details.get('OC', 'N/A')) # Use .get for safer access
+                                st.write("**Origem:**", opportunity_details.get('Origem', 'N/A'))
+                                st.write("**Prob %:**", opportunity_details.get('Prob %', 'N/A'))
+                                st.write("**OC:**", opportunity_details.get('OC', 'N/A'))
 
+                            st.subheader("Datas Principais")
+                            col_dates1, col_dates2 = st.columns(2)
+                            with col_dates1:
+                                st.write("**Data de Abertura:**", opportunity_details['Data de abertura'].strftime('%d/%m/%Y %H:%M:%S') if pd.notna(opportunity_details['Data de abertura']) else "N/A")
+                            with col_dates2:
+                                st.write("**Data de Fechamento:**", opportunity_details['Data fechamento'].strftime('%d/%m/%Y %H:%M:%S') if pd.notna(opportunity_details['Data fechamento']) else "N/A")
 
-                                st.subheader("Datas Principais")
-                                col_dates1, col_dates2 = st.columns(2)
-                                with col_dates1:
-                                    st.write("**Data de Abertura:**", opportunity_details['Data de abertura'].strftime('%d/%m/%Y %H:%M:%S') if pd.notna(opportunity_details['Data de abertura']) else "N/A")
-                                with col_dates2:
-                                    st.write("**Data de Fechamento:**", opportunity_details['Data fechamento'].strftime('%d/%m/%Y %H:%M:%S') if pd.notna(opportunity_details['Data fechamento']) else "N/A")
+                            # Use an expander for Closing Details (if available)
+                            if pd.notna(opportunity_details.get('Data fechamento')):
+                                with st.expander("Detalhes de Fechamento"):
+                                    valor_fechamento_display = "N/A"
+                                    if pd.notna(opportunity_details.get('Valor fechamento')) and pd.api.types.is_numeric_dtype(opportunity_details.get('Valor fechamento')):
+                                        valor_fechamento_display = f"R$ {opportunity_details['Valor fechamento']:,.2f}"
+                                    st.write("**Valor Fechamento:**", valor_fechamento_display)
 
-                                # Use an expander for Closing Details (if available)
-                                if pd.notna(opportunity_details.get('Data fechamento')):
-                                    with st.expander("Detalhes de Fechamento"):
-                                        # Add error handling for potential non-numeric closing values
-                                        valor_fechamento_display = "N/A"
-                                        if pd.notna(opportunity_details.get('Valor fechamento')) and pd.api.types.is_numeric_dtype(opportunity_details.get('Valor fechamento')):
-                                            valor_fechamento_display = f"R$ {opportunity_details['Valor fechamento']:,.2f}"
-                                        st.write("**Valor Fechamento:**", valor_fechamento_display)
+                                    valor_rec_fechamento_display = "N/A"
+                                    if pd.notna(opportunity_details.get('Valor rec. fechamento')) and pd.api.types.is_numeric_dtype(opportunity_details.get('Valor rec. fechamento')):
+                                        valor_rec_fechamento_display = f"R$ {opportunity_details['Valor rec. fechamento']:,.2f}"
+                                    st.write("**Valor Rec. Fechamento:**", valor_rec_fechamento_display)
 
-                                        valor_rec_fechamento_display = "N/A"
-                                        if pd.notna(opportunity_details.get('Valor rec. fechamento')) and pd.api.types.is_numeric_dtype(opportunity_details.get('Valor rec. fechamento')):
-                                            valor_rec_fechamento_display = f"R$ {opportunity_details['Valor rec. fechamento']:,.2f}"
-                                        st.write("**Valor Rec. Fechamento:**", valor_rec_fechamento_display)
+                                    st.write("**Razão de Fechamento:**", opportunity_details.get('Razão de fechamento', 'N/A'))
+                                    st.write("**Observação de Fechamento:**", opportunity_details.get('Observação de fechamento', 'N/A'))
 
-                                        st.write("**Razão de Fechamento:**", opportunity_details.get('Razão de fechamento', 'N/A')) # Use .get
-                                        st.write("**Observação de Fechamento:**", opportunity_details.get('Observação de fechamento', 'N/A')) # Use .get
+                            try:
+                                # Filter timeline for the selected opportunity identifier
+                                opportunity_timeline = df_timeline[df_timeline['OC_Identifier'] == selected_opportunity_identifier].copy()
 
+                                if not opportunity_timeline.empty:
+                                    st.subheader("Linha do Tempo da Oportunidade")
 
-                                try:
-                                    # Filter timeline for the selected opportunity identifier
-                                    opportunity_timeline = df_timeline[df_timeline['OC_Identifier'] == selected_opportunity_identifier].copy()
+                                    # --- NOVA SEÇÃO: Visualização Gráfica da Linha do Tempo ---
+                                    st.markdown("#### 📊 Visualização Gráfica da Linha do Tempo")
+                                    
+                                    # Preparar dados para o gráfico de Gantt
+                                    gantt_data = opportunity_timeline.copy()
+                                    gantt_data['Start'] = gantt_data['Data de abertura']
+                                    gantt_data['Finish'] = gantt_data['Data fechamento'].fillna(pd.Timestamp.now())
+                                    gantt_data['Task'] = gantt_data['Estágio']
+                                    
+                                    # Criar gráfico de Gantt
+                                    fig_gantt = px.timeline(
+                                        gantt_data, 
+                                        x_start="Start", 
+                                        x_end="Finish", 
+                                        y="Task",
+                                        title=f"Linha do Tempo - {selected_opportunity_identifier}",
+                                        color="Task",
+                                        color_discrete_sequence=px.colors.qualitative.Set3
+                                    )
+                                    
+                                    fig_gantt.update_layout(
+                                        xaxis_title="Data",
+                                        yaxis_title="Estágio",
+                                        height=400
+                                    )
+                                    
+                                    st.plotly_chart(fig_gantt, use_container_width=True)
 
-                                    if not opportunity_timeline.empty:
-                                        st.subheader("Linha do Tempo da Oportunidade")
+                                    # --- Gráfico de Barras do Tempo em Cada Estágio ---
+                                    st.markdown("#### ⏱️ Tempo Gasto em Cada Estágio")
+                                    
+                                    # Calcular tempo em horas para cada estágio
+                                    gantt_data['Tempo_Horas'] = (gantt_data['Finish'] - gantt_data['Start']).dt.total_seconds() / 3600
+                                    
+                                    fig_tempo = px.bar(
+                                        gantt_data,
+                                        x='Tempo_Horas',
+                                        y='Task',
+                                        orientation='h',
+                                        title="Tempo Gasto por Estágio (Horas)",
+                                        color='Task',
+                                        color_discrete_sequence=px.colors.qualitative.Pastel
+                                    )
+                                    
+                                    fig_tempo.update_layout(
+                                        xaxis_title="Tempo (Horas)",
+                                        yaxis_title="Estágio",
+                                        height=300
+                                    )
+                                    
+                                    st.plotly_chart(fig_tempo, use_container_width=True)
 
-                                        # Display timeline using a more visually appealing table format
-                                        display_timeline_cols = ['Estágio', 'Data de abertura', 'Data fechamento', 'Time_in_Stage_Formatted']
-                                        st.dataframe(opportunity_timeline[display_timeline_cols], key=f"timeline_data_{selected_opportunity_identifier}") # Add unique key
-                                    else:
-                                        st.info(f"Nenhum dado de linha do tempo encontrado para: {selected_opportunity_identifier}")
-
-                                except Exception as e:
-                                    st.error(f"Erro ao processar ou exibir dados de linha do tempo para {selected_opportunity_identifier}: {e}")
-
-
-                                # --- AI Agent Interaction Section ---
-                                st.subheader("Assistente de IA para Oportunidade")
-                                # Removed the OpenAI client check here to always show the input area
-                                # Add a placeholder message if client is not initialized
-                                if st.session_state.get('ai_response') is None: # Check if session state has a response
-                                 st.session_state['ai_response'] = "" # Initialize if not present
-
-                                if client:
-                                    user_query = st.text_area(f"Faça uma pergunta sobre a oportunidade {selected_opportunity_identifier}:", height=100, key='user_query')
-                                    col_ai_button1, col_ai_button2 = st.columns(2)
-
-                                    with col_ai_button1:
-                                        if st.button("Obter Resposta da IA", use_container_width=True):
-                                            if user_query:
-                                                with st.spinner("Obtendo resposta da IA..."):
-                                                    try:
-                                                        # Construct the prompt
-                                                        prompt = f"""
-                                                        Você é um assistente de BI focado em analisar dados de oportunidades de negócios.
-                                                        Sua tarefa é responder a perguntas sobre uma oportunidade específica com base nos dados fornecidos.
-                                                        Seja conciso e útil, focando em insights de BI e na progressão da oportunidade.
-                                                        **Use APENAS os dados fornecidos abaixo.**
-                                                        Se a pergunta do usuário não puder ser respondida com os dados disponíveis, diga isso de forma educada.
-
-                                                        Dados da Oportunidade com identificador {selected_opportunity_identifier}:
-
-                                                        Detalhes Principais:
-                                                        - ID: {opportunity_details.get('ID', 'N/A')}
-                                                        - Título: {opportunity_details.get('Título', 'N/A')}
-                                                        - Responsável: {opportunity_details.get('Responsável', 'N/A')}
-                                                        - Estado: {opportunity_details.get('Estado', 'N/A')}
-                                                        - Estágio Atual: {opportunity_details.get('Estágio', 'N/A')}
-                                                        - Valor: R$ {opportunity_details.get('Valor', 'N/A')}
-                                                        - Origem: {opportunity_details.get('Origem', 'N/A')}
-                                                        - Prob %: {opportunity_details.get('Prob %', 'N/A')}
-                                                        - OC: {opportunity_details.get('OC', 'N/A')}
-                                                        - Data de Abertura: {opportunity_details.get('Data de abertura', 'N/A')}
-                                                        - Data de Fechamento: {opportunity_details.get('Data fechamento', 'N/A')}
-
-                                                        Detalhes de Fechamento (se aplicável):
-                                                        - Valor Fechamento: R$ {opportunity_details.get('Valor fechamento', 'N/A')}
-                                                        - Valor Rec. Fechamento: R$ {opportunity_details.get('Valor rec. fechamento', 'N/A')}
-                                                        - Razão de Fechamento: {opportunity_details.get('Razão de fechamento', 'N/A')}
-                                                        - Observação de Fechamento: {opportunity_details.get('Observação de fechamento', 'N/A')}
-
-                                                        Linha do Tempo (Estágios e Tempos):
-                                                        {opportunity_timeline[['Estágio', 'Data de abertura', 'Data fechamento', 'Time_in_Stage_Formatted']].to_string(index=False)}
-
-                                                        Pergunta do Usuário: {user_query}
-
-                                                        Responda em Português do Brasil.
-                                                        """
-
-                                                        response = client.chat.completions.create(
-                                                            model="gpt-4o-mini", # Use a cost-effective model
-                                                            messages=[
-                                                                {"role": "system", "content": "Você é um assistente de BI útil e conciso."}, # System message for context
-                                                                {"role": "user", "content": prompt}
-                                                            ],
-                                                            max_tokens=300 # Limit response length
-                                                        )
-                                                        st.session_state['ai_response'] = response.choices[0].message.content
-                                                    except Exception as e:
-                                                        st.session_state['ai_response'] = f"Erro ao comunicar com a API da OpenAI: {e}"
-                                            else:
-                                                st.session_state['ai_response'] = "Por favor, digite sua pergunta sobre a oportunidade."
-
-                                    with col_ai_button2:
-                                        if st.button("Limpar Resposta da IA", use_container_width=True):
-                                            st.session_state['ai_response'] = "" # Clear the response
-
-                                    # Display the AI response
-                                    if st.session_state.get('ai_response'):
-                                        st.text_area("Resposta da IA:", value=st.session_state['ai_response'], height=200, disabled=True, key='ai_response_display')
+                                    # Display timeline table
+                                    st.markdown("#### 📋 Detalhes da Linha do Tempo")
+                                    display_timeline_cols = ['Estágio', 'Data de abertura', 'Data fechamento', 'Time_in_Stage_Formatted']
+                                    st.dataframe(opportunity_timeline[display_timeline_cols], key=f"timeline_data_{selected_opportunity_identifier}")
+                                    
                                 else:
-                                    st.info("O assistente de IA está desabilitado porque a chave da API da OpenAI não foi configurada.")
+                                    st.info(f"Nenhum dado de linha do tempo encontrado para: {selected_opportunity_identifier}")
 
+                            except Exception as e:
+                                st.error(f"Erro ao processar ou exibir dados de linha do tempo para {selected_opportunity_identifier}: {e}")
 
-                        except Exception as e:
-                            st.error(f"Erro ao carregar detalhes da oportunidade {selected_opportunity_identifier}: {e}")
+                            # --- AI Agent Interaction Section ---
+                            st.subheader("Assistente de IA para Oportunidade")
+                            
+                            if st.session_state.get('ai_response') is None:
+                                st.session_state['ai_response'] = ""
 
-                except Exception as e:
-                    st.error(f"Erro ao processar identificadores de oportunidade: {e}")
+                            if client:
+                                user_query = st.text_area(f"Faça uma pergunta sobre a oportunidade {selected_opportunity_identifier}:", height=100, key='user_query')
+                                col_ai_button1, col_ai_button2, col_ai_button3 = st.columns(3)  # Adicionado terceiro botão
 
+                                with col_ai_button1:
+                                    if st.button("Obter Resposta da IA", use_container_width=True):
+                                        if user_query:
+                                            with st.spinner("Obtendo resposta da IA..."):
+                                                try:
+                                                    prompt = f"""
+                                                    Você é um assistente de BI focado em analisar dados de oportunidades de negócios.
+                                                    Sua tarefa é responder a perguntas sobre uma oportunidade específica com base nos dados fornecidos.
+                                                    Seja conciso e útil, focando em insights de BI e na progressão da oportunidade.
+                                                    **Use APENAS os dados fornecidos abaixo.**
+                                                    Se a pergunta do usuário não puder ser respondida com os dados disponíveis, diga isso de forma educada.
 
-except Exception as e:
-        st.error(f"Ocorreu um erro geral na aplicação: {e}")
-        st.stop() # Stop the app execution on a critical error
+                                                    Dados da Oportunidade com identificador {selected_opportunity_identifier}:
 
+                                                    Detalhes Principais:
+                                                    - ID: {opportunity_details.get('ID', 'N/A')}
+                                                    - Título: {opportunity_details.get('Título', 'N/A')}
+                                                    - Responsável: {opportunity_details.get('Responsável', 'N/A')}
+                                                    - Estado: {opportunity_details.get('Estado', 'N/A')}
+                                                    - Estágio Atual: {opportunity_details.get('Estágio', 'N/A')}
+                                                    - Valor: R$ {opportunity_details.get('Valor', 'N/A')}
+                                                    - Origem: {opportunity_details.get('Origem', 'N/A')}
+                                                    - Prob %: {opportunity_details.get('Prob %', 'N/A')}
+                                                    - OC: {opportunity_details.get('OC', 'N/A')}
+                                                    - Data de Abertura: {opportunity_details.get('Data de abertura', 'N/A')}
+                                                    - Data de Fechamento: {opportunity_details.get('Data fechamento', 'N/A')}
+
+                                                    Detalhes de Fechamento (se aplicável):
+                                                    - Valor Fechamento: R$ {opportunity_details.get('Valor fechamento', 'N/A')}
+                                                    - Valor Rec. Fechamento: R$ {opportunity_details.get('Valor rec. fechamento', 'N/A')}
+                                                    - Razão de Fechamento: {opportunity_details.get('Razão de fechamento', 'N/A')}
+                                                    - Observação de Fechamento: {opportunity_details.get('Observação de fechamento', 'N/A')}
+
+                                                    Linha do Tempo (Estágios e Tempos):
+                                                    {opportunity_timeline[['Estágio', 'Data de abertura', 'Data fechamento', 'Time_in_Stage_Formatted']].to_string(index=False)}
+
+                                                    Pergunta do Usuário: {user_query}
+
+                                                    Responda em Português do Brasil.
+                                                    """
+
+                                                    response = client.chat.completions.create(
+                                                        model="gpt-4o-mini",
+                                                        messages=[
+                                                            {"role": "system", "content": "Você é um assistente de BI útil e conciso."},
+                                                            {"role": "user", "content": prompt}
+                                                        ],
+                                                        max_tokens=300
+                                                    )
+                                                    st.session_state['ai_response'] = response.choices[0].message.content
+                                                except Exception as e:
+                                                    st.session_state['ai_response'] = f"Erro ao comunicar com a API da OpenAI: {e}"
+                                        else:
+                                            st.session_state['ai_response'] = "Por favor, digite sua pergunta sobre a oportunidade."
+
+                                with col_ai_button2:
+                                    if st.button("Limpar Resposta da IA", use_container_width=True):
+                                        st.session_state['ai_response'] = ""
+
+                                with col_ai_button3:
+                                    # --- BOTÃO PARA EXPORTAR EM PDF ---
+                                    if st.button("📄 Exportar Relatório PDF", use_container_width=True):
+                                        try:
+                                            from fpdf import FPDF
+                                            import base64
+                                            from datetime import datetime
+
+                                            # Criar PDF
+                                            pdf = FPDF()
+                                            pdf.add_page()
+                                            pdf.set_auto_page_break(auto=True, margin=15)
+                                            
+                                            # Configurar fonte
+                                            pdf.set_font("Arial", size=12)
+                                            
+                                            # Título
+                                            pdf.set_font("Arial", 'B', 16)
+                                            pdf.cell(200, 10, f"Relatório da Oportunidade: {selected_opportunity_identifier}", ln=True, align='C')
+                                            pdf.ln(10)
+                                            
+                                            # Detalhes da Oportunidade
+                                            pdf.set_font("Arial", 'B', 14)
+                                            pdf.cell(200, 10, "Detalhes da Oportunidade:", ln=True)
+                                            pdf.set_font("Arial", size=12)
+                                            
+                                            details = [
+                                                f"ID: {opportunity_details.get('ID', 'N/A')}",
+                                                f"Título: {opportunity_details.get('Título', 'N/A')}",
+                                                f"Responsável: {opportunity_details.get('Responsável', 'N/A')}",
+                                                f"Estado: {opportunity_details.get('Estado', 'N/A')}",
+                                                f"Estágio Atual: {opportunity_details.get('Estágio', 'N/A')}",
+                                                f"Valor: {valor_display}",
+                                                f"Origem: {opportunity_details.get('Origem', 'N/A')}",
+                                                f"Probabilidade: {opportunity_details.get('Prob %', 'N/A')}%",
+                                                f"Data de Abertura: {opportunity_details['Data de abertura'].strftime('%d/%m/%Y %H:%M:%S') if pd.notna(opportunity_details['Data de abertura']) else 'N/A'}",
+                                                f"Data de Fechamento: {opportunity_details['Data fechamento'].strftime('%d/%m/%Y %H:%M:%S') if pd.notna(opportunity_details['Data fechamento']) else 'N/A'}"
+                                            ]
+                                            
+                                            for detail in details:
+                                                pdf.cell(200, 8, detail, ln=True)
+                                            
+                                            pdf.ln(10)
+                                            
+                                            # Linha do Tempo
+                                            if not opportunity_timeline.empty:
+                                                pdf.set_font("Arial", 'B', 14)
+                                                pdf.cell(200, 10, "Linha do Tempo:", ln=True)
+                                                pdf.set_font("Arial", size=10)
+                                                
+                                                # Cabeçalho da tabela
+                                                pdf.cell(60, 8, "Estágio", border=1)
+                                                pdf.cell(45, 8, "Data Abertura", border=1)
+                                                pdf.cell(45, 8, "Data Fechamento", border=1)
+                                                pdf.cell(40, 8, "Tempo", border=1)
+                                                pdf.ln()
+                                                
+                                                # Dados da tabela
+                                                for _, row in opportunity_timeline.iterrows():
+                                                    pdf.cell(60, 8, str(row['Estágio']), border=1)
+                                                    pdf.cell(45, 8, row['Data de abertura'].strftime('%d/%m/%Y') if pd.notna(row['Data de abertura']) else 'N/A', border=1)
+                                                    pdf.cell(45, 8, row['Data fechamento'].strftime('%d/%m/%Y') if pd.notna(row['Data fechamento']) else 'Em andamento', border=1)
+                                                    pdf.cell(40, 8, str(row['Time_in_Stage_Formatted']), border=1)
+                                                    pdf.ln()
+                                            
+                                            pdf.ln(10)
+                                            
+                                            # Resposta da IA (se disponível)
+                                            if st.session_state.get('ai_response'):
+                                                pdf.set_font("Arial", 'B', 14)
+                                                pdf.cell(200, 10, "Análise da IA:", ln=True)
+                                                pdf.set_font("Arial", size=10)
+                                                
+                                                # Quebrar texto longo para caber no PDF
+                                                ai_response = st.session_state['ai_response']
+                                                lines = []
+                                                words = ai_response.split(' ')
+                                                line = ''
+                                                for word in words:
+                                                    if pdf.get_string_width(line + ' ' + word) < 180:
+                                                        line += ' ' + word
+                                                    else:
+                                                        lines.append(line)
+                                                        line = word
+                                                lines.append(line)
+                                                
+                                                for line in lines:
+                                                    pdf.cell(200, 6, line.strip(), ln=True)
+                                            
+                                            # Data de geração
+                                            pdf.ln(10)
+                                            pdf.set_font("Arial", 'I', 8)
+                                            pdf.cell(200, 8, f"Relatório gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}", ln=True)
+                                            
+                                            # Salvar PDF
+                                            pdf_output = f"relatorio_{selected_opportunity_identifier}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+                                            pdf.output(pdf_output)
+                                            
+                                            # Ler o arquivo e criar link de download
+                                            with open(pdf_output, "rb") as f:
+                                                pdf_bytes = f.read()
+                                            
+                                            # Codificar para base64
+                                            b64 = base64.b64encode(pdf_bytes).decode()
+                                            
+                                            # Criar link de download
+                                            href = f'<a href="data:application/octet-stream;base64,{b64}" download="{pdf_output}">📥 Clique aqui para baixar o PDF</a>'
+                                            st.markdown(href, unsafe_allow_html=True)
+                                            st.success("PDF gerado com sucesso!")
+                                            
+                                        except Exception as e:
+                                            st.error(f"Erro ao gerar PDF: {e}")
+
+                                # Display the AI response
+                                if st.session_state.get('ai_response'):
+                                    st.text_area("Resposta da IA:", value=st.session_state['ai_response'], height=200, disabled=True, key='ai_response_display')
+                            else:
+                                st.info("O assistente de IA está desabilitado porque a chave da API da OpenAI não foi configurada.")
+
+                    except Exception as e:
+                        st.error(f"Erro ao carregar detalhes da oportunidade {selected_opportunity_identifier}: {e}")
+
+            except Exception as e:
+                st.error(f"Erro ao processar identificadores de oportunidade: {e}")
