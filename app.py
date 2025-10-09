@@ -1,949 +1,571 @@
 import os
 import streamlit as st
-from oauth2client.service_account import ServiceAccountCredentials
-import gspread
-from datetime import datetime
 import pandas as pd
-import re
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from streamlit_plotly_events import plotly_events
+from plotly.subplots import make_subplots
+import gspread
+from datetime import datetime, timedelta
+from oauth2client.service_account import ServiceAccountCredentials
+import re
+from streamlit_autorefresh import st_autorefresh
 
-# --- Google Sheets ---
-try:
-    # Obtenha credenciais direto do st.secrets
-    creds = st.secrets["connections"]["gsheets"]
-    
-    scope = ["https://spreadsheets.google.com/feeds",
-             "https://www.googleapis.com/auth/drive"]
-    
-    # Crie as credenciais e autorize o cliente gspread
-    credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds, scope)
-    gc = gspread.authorize(credentials)
-    
-    # Abra a planilha e a primeira aba
-    spreadsheet = gc.open_by_url(creds["spreadsheet"])
-    worksheet = spreadsheet.get_worksheet(0)  # índice da aba
+# --- CONFIGURAÇÃO DA PÁGINA ---
+st.set_page_config(
+    page_title="Painel Executivo - BI Operacional",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-except Exception as e:
-    st.error(f"Erro na autenticação do Google Sheets: {e}")
-    gc = None
+# --- ESTILOS CSS PERSONALIZADOS ---
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 3rem;
+        font-weight: bold;
+        background: linear-gradient(90deg, #0066CC, #00CCFF);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .metric-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 1.5rem;
+        border-radius: 15px;
+        color: white;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+    }
+    .metric-value {
+        font-size: 2.5rem;
+        font-weight: bold;
+        margin: 0.5rem 0;
+    }
+    .metric-label {
+        font-size: 0.9rem;
+        opacity: 0.9;
+    }
+    .positive-trend {
+        color: #00FF88;
+        font-weight: bold;
+    }
+    .negative-trend {
+        color: #FF4444;
+        font-weight: bold;
+    }
+    .section-header {
+        font-size: 1.5rem;
+        font-weight: bold;
+        color: #2E86AB;
+        margin: 2rem 0 1rem 0;
+        padding-bottom: 0.5rem;
+        border-bottom: 2px solid #2E86AB;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# --- Configuração da página ---
-st.set_page_config(layout="wide", page_title="Painel de BI Operacional")
+# --- INICIALIZAÇÃO DE SESSÃO ---
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+if 'data_loaded' not in st.session_state:
+    st.session_state.data_loaded = False
+if 'df' not in st.session_state:
+    st.session_state.df = pd.DataFrame()
+if 'df_timeline' not in st.session_state:
+    st.session_state.df_timeline = pd.DataFrame()
 
-# --- OpenAI ---
-openai_api_key = os.getenv("OPENAI_API_KEY") or st.secrets["openai"]["api_key"]
-
-if openai_api_key:
-    from openai import OpenAI
-    client = OpenAI(api_key=openai_api_key)
-else:
-    st.warning("⚠️ OpenAI API key not found. OpenAI features will be disabled.")
-    client = None
-
-@st.cache_data
-def load_data(_gspread_client):
-    """Loads data from Google Sheet using the provided gspread client."""
-    if _gspread_client is None:
-        st.warning("Cliente gspread não disponível. Não foi possível carregar os dados.")
-        return pd.DataFrame(), pd.DataFrame()
-
+# --- AUTENTICAÇÃO GOOGLE SHEETS ---
+@st.cache_resource
+def get_gspread_client():
     try:
-        B2sheet = _gspread_client.open('BI_B2')
-        page = B2sheet.sheet1
-        all_data = page.get_all_values()
-        df = pd.DataFrame(all_data[1:], columns=all_data[0])
+        creds = st.secrets["connections"]["gsheets"]
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds, scope)
+        return gspread.authorize(credentials)
+    except Exception as e:
+        st.error(f"❌ Erro na autenticação: {e}")
+        return None
 
-        # Limpeza e pré-processing
-        value_cols = ['Valor', 'Valor Rec.', 'Valor fechamento', 'Valor rec. fechamento']
-        for col in value_cols:
-            df[col] = df[col].astype(str).str.replace('R$', '', regex=False).str.replace(',', '', regex=False).str.strip()
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-
+# --- CARREGAMENTO E TRATAMENTO DE DADOS ---
+@st.cache_data(ttl=300)
+def load_and_process_data(_gc):
+    try:
+        spreadsheet = _gc.open('BI_B2')
+        worksheet = spreadsheet.sheet1
+        records = worksheet.get_all_records()
+        
+        if not records:
+            return pd.DataFrame(), pd.DataFrame()
+            
+        df = pd.DataFrame(records)
+        
+        # --- LIMPEZA E TRATAMENTO ---
+        # Remover duplicatas baseado em ID ou título
+        df = df.drop_duplicates(subset=['ID', 'Título'], keep='last')
+        
+        # Converter valores monetários
+        monetary_cols = ['Valor', 'Valor Rec.', 'Valor fechamento', 'Valor rec. fechamento']
+        for col in monetary_cols:
+            if col in df.columns:
+                df[col] = (
+                    df[col].astype(str)
+                    .str.replace('R\$', '', regex=False)
+                    .str.replace('.', '', regex=False)
+                    .str.replace(',', '.', regex=False)
+                    .str.strip()
+                )
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        
+        # Converter datas
         date_cols = ['Data de abertura', 'Data fechamento']
         for col in date_cols:
-            df[col] = pd.to_datetime(df[col], errors='coerce', format='%d/%m/%Y %H:%M:%S')
-
-        # Extract unique opportunity identifier (OC + number) from 'Título'
-        def extract_oc_identifier(title):
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True)
+        
+        # Extrair identificador único da oportunidade
+        def extract_opportunity_id(title):
             if isinstance(title, str):
-                match = re.search(r'(OC\s*\d+)', title, re.IGNORECASE)
-                if match:
-                    return match.group(1).replace(" ", "") # Remove space in "OC "
-                else:
-                    # Also check for "CTE" as it appears in titles and might be identifiers
-                    match_cte = re.search(r'(CTE\s*\d+)', title, re.IGNORECASE)
-                    if match_cte:
-                         return match_cte.group(1).replace(" ", "")
-            return None # Return None if no pattern is found
-
-        df['OC_Identifier'] = df['Título'].apply(extract_oc_identifier)
-
-        # Transformation and Feature Engineering for BI
-        # Ensure date columns are not NaT before accessing dt properties
-        df['Mes de Abertura'] = df['Data de abertura'].dt.month.fillna(0).astype(int) if pd.api.types.is_datetime64_any_dtype(df['Data de abertura']) else 0
-        df['Ano de Abertura'] = df['Data de abertura'].dt.year.fillna(0).astype(int) if pd.api.types.is_datetime64_any_dtype(df['Data de abertura']) else 0
-        df['Mes de Fechamento'] = df['Data fechamento'].dt.month.fillna(0).astype(int) if pd.api.types.is_datetime64_any_dtype(df['Data fechamento']) else 0
-        df['Ano de Fechamento'] = df['Data fechamento'].dt.year.fillna(0).astype(int) if pd.api.types.is_datetime64_any_dtype(df['Data fechamento']) else 0
-
-        # Create a 'MonthYear' column for time series analysis
-        df['MonthYear_Abertura'] = df['Data de abertura'].dt.to_period('M') if pd.api.types.is_datetime64_any_dtype(df['Data de abertura']) else None
-        df['MonthYear_Fechamento'] = df['Data fechamento'].dt.to_period('M') if pd.api.types.is_datetime64_any_dtype(df['Data fechamento']) else None
-
-        # Extract Hour of Day from 'Data de abertura'
-        df['Hour_of_Day_Abertura'] = df['Data de abertura'].apply(lambda x: x.hour if pd.notna(x) else -1).astype(int)
-
-        # Calculate Time in Stage for timeline analysis using OC_Identifier
-        df_timeline = df[['OC_Identifier', 'Estágio', 'Data de abertura', 'Data fechamento']].copy()
-        # Drop rows where OC_Identifier could not be extracted or Data de abertura is missing
-        df_timeline.dropna(subset=['OC_Identifier', 'Data de abertura'], inplace=True)
-        df_timeline = df_timeline.sort_values(by=['OC_Identifier', 'Data de abertura'])
-
-        current_time = pd.to_datetime('now') # Timezone-naive for consistency
-        df_timeline['Time_in_Stage'] = (df_timeline['Data fechamento'] - df_timeline['Data de abertura']).dt.total_seconds() / 3600 # Time in hours
-
-        df_timeline['Time_in_Stage'] = df_timeline.apply(
-            lambda row: (current_time - row['Data de abertura']).total_seconds() / 3600 if pd.isna(row['Data fechamento']) else row['Time_in_Stage'],
-            axis=1
+                patterns = [
+                    r'OC\s*(\d+)',
+                    r'CTE\s*(\d+)',
+                    r'OP\s*(\d+)',
+                    r'(\d{4,})'  # Números com 4+ dígitos
+                ]
+                for pattern in patterns:
+                    match = re.search(pattern, title, re.IGNORECASE)
+                    if match:
+                        return f"OC_{match.group(1)}"
+            return f"UNK_{hash(str(title)) % 10000:04d}"
+        
+        df['OPPORTUNITY_ID'] = df['Título'].apply(extract_opportunity_id)
+        
+        # Engenharia de features para BI
+        df['MES_ABERTURA'] = df['Data de abertura'].dt.to_period('M')
+        df['ANO_ABERTURA'] = df['Data de abertura'].dt.year
+        df['DIA_SEMANA'] = df['Data de abertura'].dt.day_name()
+        df['HORA_ABERTURA'] = df['Data de abertura'].dt.hour
+        
+        # Classificar estágios
+        df['ESTAGIO_GRUPO'] = df['Estágio'].apply(
+            lambda x: 'INICIAL' if any(word in str(x).upper() for word in ['QUALIFIC', 'PROSPEC']) 
+            else 'NEGOCIACAO' if any(word in str(x).upper() for word in ['NEGOC', 'PROPOSTA'])
+            else 'FECHAMENTO' if any(word in str(x).upper() for word in ['FECH', 'GANH', 'PERDID'])
+            else 'OUTROS'
         )
-
-        # Format 'Time_in_Stage' for display to include minutes
-        def format_time_in_stage(hours):
-            if pd.isna(hours):
-                return "N/A"
-            total_minutes = int(hours * 60)
-            days = total_minutes // (24 * 60)
-            remaining_minutes_after_days = total_minutes % (24 * 60)
-            hours = remaining_minutes_after_days // 60
-            minutes = remaining_minutes_after_days % 60
-            return f"{days} days, {hours} hours, {minutes} minutes"
-
-        df_timeline['Time_in_Stage_Formatted'] = df_timeline['Time_in_Stage'].apply(format_time_in_stage)
-
+        
+        # Criar timeline para análise de tempo
+        df_timeline = df[['OPPORTUNITY_ID', 'Estágio', 'Data de abertura', 'Data fechamento', 'Estado']].copy()
+        df_timeline = df_timeline.dropna(subset=['Data de abertura'])
+        
+        if not df_timeline.empty:
+            current_time = pd.Timestamp.now()
+            df_timeline['TEMPO_ESTAGIO_HORAS'] = (
+                df_timeline['Data fechamento'].fillna(current_time) - df_timeline['Data de abertura']
+            ).dt.total_seconds() / 3600
+            
+            df_timeline['TEMPO_ESTAGIO_DIAS'] = df_timeline['TEMPO_ESTAGIO_HORAS'] / 24
+        
         return df, df_timeline
-
+        
     except Exception as e:
-        st.error(f"Erro ao carregar dados do Google Sheet: {e}")
-        return pd.DataFrame(), pd.DataFrame() # Return empty dataframes on error
+        st.error(f"❌ Erro no carregamento: {e}")
+        return pd.DataFrame(), pd.DataFrame()
 
-# Load data (pass the gc client)
-df, df_timeline = load_data(gc)
+# --- KPI CALCULATIONS ---
+def calculate_kpis(df):
+    if df.empty:
+        return {}
+    
+    kpis = {}
+    
+    # Oportunidades únicas
+    kpis['total_oportunidades'] = df['OPPORTUNITY_ID'].nunique()
+    
+    # Valor total
+    kpis['valor_total_aberto'] = df[df['Estado'].isin(['Aberta', 'Em andamento'])]['Valor'].sum()
+    kpis['valor_total_ganho'] = df[df['Estado'] == 'Ganha']['Valor fechamento'].sum()
+    
+    # Taxa de conversão
+    oportunidades_ganhas = df[df['Estado'] == 'Ganha']['OPPORTUNITY_ID'].nunique()
+    kpis['taxa_conversao'] = (oportunidades_ganhas / kpis['total_oportunidades'] * 100) if kpis['total_oportunidades'] > 0 else 0
+    
+    # Tempo médio de fechamento
+    oportunidades_fechadas = df[df['Estado'].isin(['Ganha', 'Perdida'])]
+    if not oportunidades_fechadas.empty:
+        tempo_medio = (oportunidades_fechadas['Data fechamento'] - oportunidades_fechadas['Data de abertura']).dt.days.mean()
+        kpis['tempo_medio_fechamento'] = tempo_medio
+    else:
+        kpis['tempo_medio_fechamento'] = 0
+    
+    # Eficiência por responsável
+    if 'Responsável' in df.columns:
+        resp_stats = df.groupby('Responsável').agg({
+            'OPPORTUNITY_ID': 'nunique',
+            'Valor': 'sum',
+            'Estado': lambda x: (x == 'Ganha').sum()
+        }).round(2)
+        kpis['top_responsavel'] = resp_stats.nlargest(1, 'OPPORTUNITY_ID').iloc[0] if not resp_stats.empty else None
+    
+    # Pipeline por estágio
+    pipeline_estagio = df.groupby('Estágio').agg({
+        'OPPORTUNITY_ID': 'nunique',
+        'Valor': 'sum'
+    }).round(2)
+    kpis['pipeline_estagio'] = pipeline_estagio
+    
+    return kpis
 
-# --- Placeholder Interaction Data ---
-# Create a simple placeholder DataFrame for site interaction data
-interaction_data = {
-    'User': ['User A', 'User B', 'User C', 'User A', 'User B', 'User D', 'User A'],
-    'Interactions': [10, 15, 8, 12, 18, 5, 11]
-}
-df_interaction = pd.DataFrame(interaction_data)
+# --- COMPONENTES VISUAIS ---
+def create_metric_card(title, value, change=None, format_func=None):
+    if format_func:
+        value_str = format_func(value)
+    else:
+        value_str = str(value)
+    
+    change_html = ""
+    if change is not None:
+        change_class = "positive-trend" if change >= 0 else "negative-trend"
+        change_symbol = "↗" if change >= 0 else "↘"
+        change_html = f'<div class="{change_class}">{change_symbol} {abs(change):.1f}%</div>'
+    
+    return f"""
+    <div class="metric-card">
+        <div class="metric-label">{title}</div>
+        <div class="metric-value">{value_str}</div>
+        {change_html}
+    </div>
+    """
 
-# Aggregate interaction data by user
-df_agg_interaction = df_interaction.groupby('User')['Interactions'].sum().reset_index()
+def format_currency(value):
+    return f"R$ {value:,.0f}".replace(",", ".")
 
-# --- Authentication Logic ---
-# Initialize session state for authentication
-if 'authenticated' not in st.session_state:
-    st.session_state['authenticated'] = False
+def format_percentage(value):
+    return f"{value:.1f}%"
 
-# Tenta pegar do st.secrets; se não existir, pega do ambiente
-VALID_USERNAME = st.secrets.get("login", {}).get("username") or os.getenv("VALID_USERNAME")
-VALID_PASSWORD = st.secrets.get("login", {}).get("password") or os.getenv("VALID_PASSWORD")
+# --- PÁGINA DE LOGIN ---
+def login_page():
+    st.markdown('<div class="main-header">🔐 Painel Executivo</div>', unsafe_allow_html=True)
+    
+    with st.container():
+        col1, col2, col3 = st.columns([1,2,1])
+        with col2:
+            with st.form("login_form"):
+                st.subheader("Acesso Restrito")
+                username = st.text_input("Usuário")
+                password = st.text_input("Senha", type="password")
+                
+                if st.form_submit_button("🚀 Acessar Painel", use_container_width=True):
+                    valid_user = st.secrets.get("login", {}).get("username")
+                    valid_pass = st.secrets.get("login", {}).get("password")
+                    
+                    if username == valid_user and password == valid_pass:
+                        st.session_state.authenticated = True
+                        st.session_state.data_loaded = False
+                        st.rerun()
+                    else:
+                        st.error("Credenciais inválidas")
 
-def authenticate(username, password):
-    """Simple function to check placeholder credentials."""
-    return username == VALID_USERNAME and password == VALID_PASSWORD
+# --- PAINEL PRINCIPAL ---
+def main_dashboard():
+    # Header
+    col1, col2, col3 = st.columns([2,1,1])
+    with col1:
+        st.markdown('<div class="main-header">📊 Painel Executivo - BI Operacional</div>', unsafe_allow_html=True)
+    with col3:
+        if st.button("🔄 Atualizar Dados", use_container_width=True):
+            st.cache_data.clear()
+            st.session_state.data_loaded = False
+            st.rerun()
+    
+    # Carregar dados se necessário
+    if not st.session_state.data_loaded:
+        with st.spinner("📥 Carregando dados..."):
+            gc = get_gspread_client()
+            if gc:
+                df, df_timeline = load_and_process_data(gc)
+                st.session_state.df = df
+                st.session_state.df_timeline = df_timeline
+                st.session_state.data_loaded = True
+                st.rerun()
+    
+    if st.session_state.df.empty:
+        st.warning("⚠️ Nenhum dado disponível. Verifique a conexão com a planilha.")
+        return
+    
+    # KPIs PRINCIPAIS
+    kpis = calculate_kpis(st.session_state.df)
+    
+    st.markdown('<div class="section-header">📈 MÉTRICAS EXECUTIVAS</div>', unsafe_allow_html=True)
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.markdown(create_metric_card(
+            "OPORTUNIDADES", 
+            kpis.get('total_oportunidades', 0),
+            format_func=lambda x: f"{x:,.0f}".replace(",", ".")
+        ), unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown(create_metric_card(
+            "VALOR EM PIPELINE",
+            kpis.get('valor_total_aberto', 0),
+            format_func=format_currency
+        ), unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown(create_metric_card(
+            "VALOR GANHO",
+            kpis.get('valor_total_ganho', 0),
+            format_func=format_currency
+        ), unsafe_allow_html=True)
+    
+    with col4:
+        st.markdown(create_metric_card(
+            "TAXA DE SUCESSO",
+            kpis.get('taxa_conversao', 0),
+            format_func=format_percentage
+        ), unsafe_allow_html=True)
+    
+    # VISUALIZAÇÕES PRINCIPAIS
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown('<div class="section-header">📊 PIPELINE POR ESTÁGIO</div>', unsafe_allow_html=True)
+        
+        if not kpis.get('pipeline_estagio', pd.DataFrame()).empty:
+            pipeline_data = kpis['pipeline_estagio'].reset_index()
+            fig = px.funnel(
+                pipeline_data, 
+                x='Valor', 
+                y='Estágio',
+                title="Valor em Pipeline por Estágio",
+                color='Estágio',
+                height=400
+            )
+            fig.update_layout(showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Sem dados de pipeline disponíveis")
+    
+    with col2:
+        st.markdown('<div class="section-header">📈 EVOLUÇÃO MENSAL</div>', unsafe_allow_html=True)
+        
+        evolucao_mensal = st.session_state.df.groupby(
+            st.session_state.df['Data de abertura'].dt.to_period('M')
+        ).agg({
+            'OPPORTUNITY_ID': 'nunique',
+            'Valor': 'sum'
+        }).reset_index()
+        
+        evolucao_mensal['Data de abertura'] = evolucao_mensal['Data de abertura'].astype(str)
+        
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=evolucao_mensal['Data de abertura'],
+            y=evolucao_mensal['OPPORTUNITY_ID'],
+            name='Oportunidades',
+            line=dict(color='#00CCFF', width=3)
+        ))
+        fig.add_trace(go.Bar(
+            x=evolucao_mensal['Data de abertura'],
+            y=evolucao_mensal['Valor'],
+            name='Valor (R$)',
+            yaxis='y2',
+            opacity=0.6
+        ))
+        
+        fig.update_layout(
+            xaxis_title="Mês",
+            yaxis_title="Quantidade de Oportunidades",
+            yaxis2=dict(
+                title="Valor (R$)",
+                overlaying='y',
+                side='right'
+            ),
+            height=400,
+            showlegend=True
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # ANÁLISE DE PERFORMANCE
+    st.markdown('<div class="section-header">🎯 ANÁLISE DE PERFORMANCE</div>', unsafe_allow_html=True)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Heatmap de atividades por hora e dia
+        st.subheader("🏢 Atividade por Hora do Dia")
+        
+        if not st.session_state.df.empty:
+            heatmap_data = st.session_state.df.pivot_table(
+                index='DIA_SEMANA',
+                columns='HORA_ABERTURA',
+                values='OPPORTUNITY_ID',
+                aggfunc='count',
+                fill_value=0
+            )
+            
+            # Ordenar dias da semana
+            dias_ordenados = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+            heatmap_data = heatmap_data.reindex(dias_ordenados)
+            
+            fig = px.imshow(
+                heatmap_data,
+                title="Oportunidades por Dia e Hora",
+                color_continuous_scale='Blues',
+                aspect="auto"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        # Distribuição por estágio
+        st.subheader("📋 Distribuição por Estágio")
+        
+        dist_estagio = st.session_state.df['Estágio'].value_counts().reset_index()
+        dist_estagio.columns = ['Estágio', 'Quantidade']
+        
+        fig = px.pie(
+            dist_estagio, 
+            values='Quantidade', 
+            names='Estágio',
+            hole=0.4,
+            color_discrete_sequence=px.colors.sequential.Blues_r
+        )
+        fig.update_traces(textposition='inside', textinfo='percent+label')
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # TOP PERFORMERS
+    st.markdown('<div class="section-header">🏆 TOP PERFORMERS</div>', unsafe_allow_html=True)
+    
+    if 'Responsável' in st.session_state.df.columns:
+        top_responsaveis = st.session_state.df.groupby('Responsável').agg({
+            'OPPORTUNITY_ID': 'nunique',
+            'Valor': 'sum',
+            'Estado': lambda x: (x == 'Ganha').sum()
+        }).round(2).nlargest(10, 'OPPORTUNITY_ID')
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Top 10 por Volume")
+            fig = px.bar(
+                top_responsaveis.reset_index(),
+                x='Responsável',
+                y='OPPORTUNITY_ID',
+                title="Oportunidades por Responsável",
+                color='OPPORTUNITY_ID',
+                color_continuous_scale='Viridis'
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            st.subheader("Top 10 por Valor")
+            top_valor = st.session_state.df.groupby('Responsável')['Valor'].sum().nlargest(10)
+            fig = px.bar(
+                top_valor.reset_index(),
+                x='Responsável',
+                y='Valor',
+                title="Valor por Responsável",
+                color='Valor',
+                color_continuous_scale='Plasma'
+            )
+            st.plotly_chart(fig, use_container_width=True)
+    
+    # ANÁLISE TEMPORAL DETALHADA
+    st.markdown('<div class="section-header">⏰ ANÁLISE TEMPORAL</div>', unsafe_allow_html=True)
+    
+    if not st.session_state.df_timeline.empty:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Tempo médio por estágio
+            tempo_estagio = st.session_state.df_timeline.groupby('Estágio')['TEMPO_ESTAGIO_DIAS'].mean().sort_values()
+            
+            fig = px.bar(
+                tempo_estagio.reset_index(),
+                x='TEMPO_ESTAGIO_DIAS',
+                y='Estágio',
+                orientation='h',
+                title="Tempo Médio por Estágio (Dias)",
+                color='TEMPO_ESTAGIO_DIAS',
+                color_continuous_scale='Reds'
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Eficiência do pipeline
+            st.subheader("📈 Eficiência do Pipeline")
+            
+            eficiencia = st.session_state.df_timeline.groupby('Estágio').agg({
+                'OPPORTUNITY_ID': 'nunique',
+                'TEMPO_ESTAGIO_DIAS': 'mean'
+            }).round(2)
+            
+            fig = go.Figure(data=[
+                go.Bar(name='Quantidade', x=eficiencia.index, y=eficiencia['OPPORTUNITY_ID'], yaxis='y1'),
+                go.Scatter(name='Tempo Médio (Dias)', x=eficiencia.index, y=eficiencia['TEMPO_ESTAGIO_DIAS'], yaxis='y2')
+            ])
+            
+            fig.update_layout(
+                xaxis_title="Estágio",
+                yaxis=dict(title="Quantidade", side='left'),
+                yaxis2=dict(title="Tempo Médio (Dias)", side='right', overlaying='y'),
+                showlegend=True
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
-# --- Multi-page Navigation ---
-st.sidebar.title("Navegação")
-
-# Determine the current page based on authentication status and sidebar selection
-if st.session_state['authenticated']:
-    # If authenticated, show all pages in the sidebar radio
-    if 'page' not in st.session_state:
-        st.session_state['page'] = "Página Inicial"
-
-    page = st.sidebar.radio("Ir para:", ["Página Inicial", "Painel Geral", "Relatório de Oportunidade"], index=["Página Inicial", "Painel Geral", "Relatório de Oportunidade"].index(st.session_state['page']))
-
-    # Update session state page when sidebar changes
-    st.session_state['page'] = page
-
-    # Add Logout button if authenticated
-    if st.sidebar.button("Logout"):
-        st.session_state['authenticated'] = False
-        st.session_state['page'] = "Login" # Redirect to login on logout
-        st.rerun() # Rerun to show login page
-else:
-    # If not authenticated, force the page to "Login" and hide other options
-    page = "Login"
-    st.session_state['page'] = "Login" # Ensure session state reflects the login page
-
-# --- Refresh Button (only show if authenticated) ---
-if st.session_state['authenticated']:
-    if st.sidebar.button("Atualizar Dados"):
-        st.cache_data.clear() # Clear the cache for load_data
-        st.rerun() # Rerun the app to load fresh data
-
-# Main app logic within a try-except block for general errors
-try:
-    if page == "Login":
-        # --- Login Page ---
-        st.title("Login")
-        st.markdown("Por favor, insira suas credenciais para acessar o painel.")
-
-        # Create input fields for username and password
-        with st.form("login_form"):
-            username = st.text_input("Nome de Usuário")
-            password = st.text_input("Senha", type="password")
-            login_button = st.form_submit_button("Login")
-
-            if login_button:
-                if authenticate(username, password):
-                    st.session_state['authenticated'] = True
-                    st.success("Login bem-sucedido!")
-                    # Redirect to "Página Inicial" after successful login
-                    st.session_state['page'] = "Página Inicial" # Set the page in session state
-                    st.rerun() # Rerun to show the initial page content
-                else:
-                    st.error("Nome de usuário ou senha inválidos.")
-
-    # Conditionally render other pages based on authentication
-    elif st.session_state['authenticated']:
-        if page == "Página Inicial":
-            # --- Página Inicial (after login) ---
-            st.title("Bem-vindo ao Painel de BI Operacional")
-
-            st.markdown("""
-                Este painel interativo oferece insights valiosos sobre suas oportunidades de negócios.
-                Navegue pelas seções usando o menu ao lado para explorar:
-
-                *   **Painel Geral**: Uma visão abrangente das métricas e distribuições de oportunidades.
-                *   **Relatório de Oportunidade Individual**: Análise detalhada da linha do tempo e informações de oportunidades específicas.
-
-                Utilize os filtros em cada página para personalizar sua análise.
-            """)
-
-            # Add some visual elements or structure
-            st.subheader("Visão Geral Rápida")
-            col_intro1, col_intro2 = st.columns(2)
-
-            with col_intro1:
-                st.info("Clique no 'Painel Geral' para começar a explorar os dados agregados.")
-
-            with col_intro2:
-                st.info("Clique em 'Relatório de Oportunidade' para analisar oportunidades específicas.")
-
-            st.markdown("---") # Separator
-
-            st.subheader("Interação do Site por Usuário (Dados de Exemplo)")
-            # Create and display the interaction graph using the placeholder data
-            if not df_agg_interaction.empty:
-                fig_interaction = px.bar(df_agg_interaction, x='User', y='Interactions',
-                                         title='Total de Interações do Site por Usuário (Dados de Exemplo)',
-                                         template='plotly_white',
-                                         color='User', # Color by user
-                                         color_discrete_sequence=px.colors.qualitative.Plotly) # Use a standard Plotly color scale
-
-                fig_interaction.update_layout(xaxis_title="Usuário", yaxis_title="Número Total de Interações")
-                st.plotly_chart(fig_interaction, use_container_width=True)
-            else:
-                st.info("Nenhum dado de interação de usuário disponível para exibir.")
-
-            st.markdown("---") # Separator
-
-            st.subheader("Sobre o Projeto")
-            st.markdown("""
-                Este projeto de Business Intelligence foi desenvolvido para fornecer uma visão clara e acionável
-                sobre o desempenho das oportunidades de negócios, identificar gargalos no processo e facilitar a tomada de decisão.
-
-                **Idealizador e Supervisor de Projetos:**
-                Allisson Silva
-
-                **Contato:**
-                *   Telefone: +55 81 9760-0051
-                *   Gmail: allisson.silva.modal@gmail.com
-                *   Outlook: Allisson.silva@logmultimodal.com.br
-
-                Sinta-se à vontade para entrar em contato para feedback, sugestões ou colaboração.
-            """)
-
-        elif page == "Painel Geral":
-            # --- Painel Geral ---
-            st.title("Painel de BI Operacional - Geral")
-
-            st.markdown("""
-            Este painel apresenta insights gerais sobre os dados operacionais,
-            permitindo acompanhar o desempenho e a distribuição dos negócios.
-            """)
-
-            if not df.empty:
-                # Add filters to the sidebar
-                st.sidebar.subheader("Filtros do Painel Geral")
-
-                # Date range filter for 'Data de abertura'
-                if not df['Data de abertura'].empty:
-                    min_date_abertura = df['Data de abertura'].min().date()
-                    max_date_abertura = df['Data de abertura'].max().date()
-
-                    start_date = st.sidebar.date_input("Data de Abertura (Início)", min_value=min_date_abertura, max_value=max_date_abertura, value=min_date_abertura)
-                    end_date = st.sidebar.date_input("Data de Abertura (Fim)", min_value=min_date_abertura, max_value=max_date_abertura, value=max_date_abertura)
-
-                    # Convert selected dates to datetime objects for filtering
-                    start_datetime = pd.to_datetime(start_date)
-                    end_datetime = pd.to_datetime(end_date)
-
-                    # Apply date filter
-                    filtered_df = df[(df['Data de abertura'] >= start_datetime) & (df['Data de abertura'] <= end_datetime)].copy()
-                else:
-                    filtered_df = df.copy() # If date column is empty, use the original df
-
-                # Filter by Estado
-                selected_estados = st.sidebar.multiselect("Selecionar Estado:", filtered_df['Estado'].unique(), filtered_df['Estado'].unique())
-                filtered_df = filtered_df[filtered_df['Estado'].isin(selected_estados)]
-
-                # Filter by Responsável (Initial filter)
-                selected_responsaveis_sidebar = st.sidebar.multiselect("Selecionar Responsável (Filtro Inicial):", filtered_df['Responsável'].unique(), filtered_df['Responsável'].unique())
-                filtered_df = filtered_df[filtered_df['Responsável'].isin(selected_responsaveis_sidebar)]
-
-                # Filter by Estágio
-                selected_estagios = st.sidebar.multiselect("Selecionar Estágio:", filtered_df['Estágio'].unique(), filtered_df['Estágio'].unique())
-                filtered_df = filtered_df[filtered_df['Estágio'].isin(selected_estagios)]
-
-                # Add filter by OC_Identifier for the general dashboard
-                opportunity_identifiers = filtered_df['OC_Identifier'].dropna().unique()
-                selected_opportunity_identifier_general = st.sidebar.selectbox(
-                    "Filtrar por Oportunidade (OC + Número ou CTE + Número):",
-                    ['Todos'] + list(opportunity_identifiers)
+# --- APLICAÇÃO PRINCIPAL ---
+def main():
+    if not st.session_state.authenticated:
+        login_page()
+    else:
+        # Sidebar
+        with st.sidebar:
+            st.title("🎯 Navegação")
+            st.markdown("---")
+            
+            if st.button("🚪 Logout", use_container_width=True):
+                st.session_state.authenticated = False
+                st.session_state.data_loaded = False
+                st.rerun()
+            
+            st.markdown("---")
+            st.markdown("### 📊 Filtros")
+            
+            # Filtros dinâmicos quando dados carregados
+            if st.session_state.data_loaded and not st.session_state.df.empty:
+                # Filtro por período
+                min_date = st.session_state.df['Data de abertura'].min().date()
+                max_date = st.session_state.df['Data de abertura'].max().date()
+                
+                date_range = st.date_input(
+                    "Período de Análise",
+                    value=(min_date, max_date),
+                    min_value=min_date,
+                    max_value=max_date
                 )
-
-                if selected_opportunity_identifier_general != 'Todos':
-                     filtered_df = filtered_df[filtered_df['OC_Identifier'] == selected_opportunity_identifier_general].copy()
-
-                # Agregações para visualizações (using filtered_df)
-                # Aggregate to count unique OC_Identifier per Responsável
-                df_agg_responsavel_count = filtered_df.groupby('Responsável')['OC_Identifier'].nunique().reset_index()
-                df_agg_responsavel_count.rename(columns={'OC_Identifier': 'Unique Opportunity Count'}, inplace=True)
-
-                # Aggregate to count unique OC_Identifier per Estado and MonthYear_Abertura
-                df_agg_estado_mes_count = filtered_df.groupby(['Estado', 'MonthYear_Abertura'])['OC_Identifier'].nunique().reset_index()
-                df_agg_estado_mes_count.rename(columns={'OC_Identifier': 'Unique Opportunity Count'}, inplace=True)
-                df_agg_estado_mes_count['MonthYear_Abertura'] = df_agg_estado_mes_count['MonthYear_Abertura'].astype(str) # Convert to string for plotting
-
-                # Filter for 'Ganha' deals for specific visualizations
-                ganha_df_filtered = filtered_df[filtered_df['Estado'] == 'Ganha'].copy()
-
-                # --- Display Key Metrics (KPIs) ---
-                st.subheader("Resumo Geral")
-                col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
-
-                total_opportunities = filtered_df['OC_Identifier'].nunique() if not filtered_df.empty else 0
-                total_won_value = ganha_df_filtered['Valor'].sum() if not ganha_df_filtered.empty else 0
-                win_rate = (len(ganha_df_filtered) / total_opportunities * 100) if total_opportunities > 0 else 0
-
-                col_kpi1.metric("Total Oportunidades Únicas", total_opportunities)
-                col_kpi2.metric("Valor Total Ganho", f"R$ {total_won_value:,.2f}")
-                col_kpi3.metric("Taxa de Sucesso", f"{win_rate:.2f}%")
-
-                # --- Visualizations ---
-                st.subheader("Análise de Oportunidades e Valor")
-
-                # Use columns to arrange the plots side-by-side
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    st.subheader("Quantidade de Oportunidades Únicas por Responsável")
-                    if not df_agg_responsavel_count.empty:
-                        # Using Plotly Express for interactivity and improved style
-                        fig1 = px.bar(df_agg_responsavel_count, x='Responsável', y='Unique Opportunity Count',
-                                      title='Quantidade de Oportunidades Únicas por Responsável',
-                                      color='Responsável', # Add color by responsible for visual distinction
-                                      template='plotly_white', # Use a clean template
-                                      color_discrete_sequence=px.colors.qualitative.Set2) # Use a different color scale
-
-                        fig1.update_layout(xaxis_title="Responsável", yaxis_title="Contagem Única de Oportunidades") # Improved axis titles
-
-                        # Capture selection - Keep for potential filtering later
-                        selected_points = plotly_events(fig1, select_event=True)
-
-                        if selected_points:
-                            selected_responsaveis_chart = [p['x'] for p in selected_points]
-                            filtered_df_chart_selection = filtered_df[filtered_df['Responsável'].isin(selected_responsaveis_chart)].copy()
-                        else:
-                            filtered_df_chart_selection = filtered_df.copy()
-
-                    else:
-                        st.info("Nenhum dado disponível para 'Quantidade de Oportunidades Únicas por Responsável' com os filtros selecionados.")
-                        filtered_df_chart_selection = filtered_df.copy() # Use sidebar filtered data if no chart data
-
-                with col2:
-                     # Recalculate aggregated data based on chart selection
-                     df_agg_estado_mes_count_filtered = filtered_df_chart_selection.groupby(['Estado', 'MonthYear_Abertura'])['OC_Identifier'].nunique().reset_index()
-                     df_agg_estado_mes_count_filtered.rename(columns={'OC_Identifier': 'Unique Opportunity Count'}, inplace=True)
-                     df_agg_estado_mes_count_filtered['MonthYear_Abertura'] = df_agg_estado_mes_count_filtered['MonthYear_Abertura'].astype(str) # Convert to string for plotting
-
-                     st.subheader("Quantidade de Negócios Únicos por Estado e Mês de Abertura")
-                     if not df_agg_estado_mes_count_filtered.empty:
-                         # Using Plotly Express for the improved chart
-                         fig2 = px.bar(df_agg_estado_mes_count_filtered, x='MonthYear_Abertura', y='Unique Opportunity Count', color='Estado',
-                                       title='Quantidade de Negócios Únicos por Estado e Mês de Abertura',
-                                       barmode='group', # Use 'group' or 'stack'
-                                       template='plotly_white', # Use a clean template
-                                       color_discrete_sequence=px.colors.qualitative.Pastel) # Use a different color scale
-
-                         fig2.update_layout(xaxis_title="Mês/Ano de Abertura", yaxis_title="Quantidade de Oportunidades Únicas")
-                         st.plotly_chart(fig2, use_container_width=True)
-
-                     else:
-                          st.info("Nenhum dado disponível para 'Quantidade de Negócios Únicos por Estado e Mês de Abertura' com os filtros selecionados.")
-
-                # Separate row for the heatmap
-                st.subheader("Heatmap: Oportunidades por Etapa e Hora de Abertura")
-                if not df_timeline.empty:
-                    # Filter timeline data based on the date range selected for the main dashboard
-                    df_timeline_filtered_for_heatmap = df_timeline[(df_timeline['Data de abertura'] >= start_datetime) & (df_timeline['Data de abertura'] <= end_datetime)].copy()
-
-                    # Further filter timeline data based on chart selection and Estado/Estágio filters
-                    if selected_points:
-                         selected_oc_identifiers_chart = filtered_df_chart_selection['OC_Identifier'].unique()
-                         df_timeline_filtered_for_heatmap = df_timeline_filtered_for_heatmap[df_timeline_filtered_for_heatmap['OC_Identifier'].isin(selected_oc_identifiers_chart)].copy()
-                    df_timeline_filtered_for_heatmap = df_timeline_filtered_for_heatmap[df_timeline_filtered_for_heatmap['Estágio'].isin(selected_estagios)].copy()
-
-                    # Filter heatmap data by selected OC_Identifier for the general dashboard
-                    if selected_opportunity_identifier_general != 'Todos':
-                         df_timeline_filtered_for_heatmap = df_timeline_filtered_for_heatmap[df_timeline_filtered_for_heatmap['OC_Identifier'] == selected_opportunity_identifier_general].copy()
-
-                    # Aggregate data for the heatmap (count unique OC_Identifier per Estágio and Hour_of_Day_Abertura)
-                    # Ensure 'Hour_of_Day_Abertura' is extracted for the filtered timeline data
-                    df_timeline_filtered_for_heatmap['Hour_of_Day_Abertura'] = df_timeline_filtered_for_heatmap['Data de abertura'].dt.hour
-
-                    if not df_timeline_filtered_for_heatmap.empty:
-                         heatmap_data = df_timeline_filtered_for_heatmap.groupby(['Estágio', 'Hour_of_Day_Abertura'])['OC_Identifier'].nunique().unstack(fill_value=0)
-
-                         if not heatmap_data.empty:
-                            # Use go.Heatmap to create the heatmap with improved style and colorscale
-                            fig_heatmap = go.Figure(data=go.Heatmap(
-                                   z=heatmap_data.values,
-                                   x=heatmap_data.columns,
-                                   y=heatmap_data.index,
-                                   colorscale='Portland')) # Use a different color scale
-
-                            fig_heatmap.update_layout(title='Oportunidades por Etapa e Hora de Abertura',
-                                                      xaxis_title='Hora do Dia',
-                                                      yaxis_title='Etapa',
-                                                      template='plotly_white') # Use a clean template
-
-                            st.plotly_chart(fig_heatmap, use_container_width=True)
-                         else:
-                              st.info("Nenhum dado agregado disponível para o Heatmap com os filtros selecionados.")
-                    else:
-                         st.info("Nenhum dado de timeline disponível para o Heatmap com os filtros selecionados.")
-                else:
-                     st.info("Dados de timeline não disponíveis para o Heatmap.")
-
-                # Another row for the distribution plots
-                st.subheader("Análise de Estágios")
-                # Use a single column for the remaining distribution plot after removing one
-                col5, = st.columns(1)
-
-                with col5:
-                    if not filtered_df_chart_selection.empty:
-                        # Distribution of all stages (not just 'Ganha') with improved style and colors
-                        st.subheader("Distribuição de Todos os Estágios (Filtered)")
-                        # Convert to Plotly bar chart
-                        stage_counts = filtered_df_chart_selection['Estágio'].value_counts().reset_index()
-                        stage_counts.columns = ['Estágio', 'Count']
-                        fig4 = px.bar(stage_counts, x='Estágio', y='Count',
-                                      title='Distribuição de Todos os Estágios',
-                                      color='Estágio', # Color by stage
-                                      template='plotly_white', # Use a clean template
-                                      color_discrete_sequence=px.colors.qualitative.Set3) # Use a different color scale
-                        fig4.update_layout(xaxis_title="Estágio", yaxis_title="Contagem")
-                        st.plotly_chart(fig4, use_container_width=True)
-                    else:
-                        st.info("Nenhum dado disponível para 'Distribuição de Todos os Estágios' com os filtros selecionados.")
-
-                # Final row for the timeline analysis metrics
-                st.subheader("Análise de Tempo Médio por Estágio (Filtered)")
-                if not df_timeline.empty:
-                    # Filter timeline data based on the date range selected for the main dashboard
-                    df_timeline_filtered = df_timeline[(df_timeline['Data de abertura'] >= start_datetime) & (df_timeline['Data de abertura'] <= end_datetime)].copy()
-
-                    # Further filter timeline data based on chart selection and Estado/Estágio filters
-                    if selected_points:
-                         # Filter timeline data based on selected OC_Identifiers from the chart selection
-                         selected_oc_identifiers_chart = filtered_df_chart_selection['OC_Identifier'].unique()
-                         df_timeline_filtered = df_timeline_filtered[df_timeline_filtered['OC_Identifier'].isin(selected_oc_identifiers_chart)].copy()
-                    df_timeline_filtered = df_timeline_filtered[df_timeline_filtered['Estágio'].isin(selected_estagios)].copy()
-
-                    # Filter timeline data by selected OC_Identifier for the general dashboard
-                    if selected_opportunity_identifier_general != 'Todos':
-                         df_timeline_filtered = df_timeline_filtered[df_timeline_filtered['OC_Identifier'] == selected_opportunity_identifier_general].copy()
-
-                    if not df_timeline_filtered.empty:
-                        df_agg_time_per_stage_avg = df_timeline_filtered.groupby('Estágio')['Time_in_Stage'].mean().reset_index()
-                        df_agg_time_per_stage_avg = df_agg_time_per_stage_avg.sort_values(by='Time_in_Stage', ascending=False)
-
-                        # Format 'Time_in_Stage' for display to include minutes
-                        def format_time_in_stage(hours):
-                            if pd.isna(hours):
-                                return "N/A"
-                            total_minutes = int(hours * 60)
-                            days = total_minutes // (24 * 60)
-                            remaining_minutes_after_days = total_minutes % (24 * 60)
-                            hours = remaining_minutes_after_days // 60
-                            minutes = remaining_minutes_after_days % 60
-                            return f"{days} days, {hours} hours, {minutes} minutes"
-
-                        df_agg_time_per_stage_avg['Average Time in Stage'] = df_agg_time_per_stage_avg['Time_in_Stage'].apply(format_time_in_stage)
-
-                        st.write("Tempo Médio em Cada Estágio:")
-                        st.dataframe(df_agg_time_per_stage_avg[['Estágio', 'Average Time in Stage']])
-
-                        # Visualization of average time per stage (using the numerical value) with improved style and colors
-                        st.subheader("Tempo Médio por Estágio Visualização (Filtered)")
-                        # Convert to Plotly bar chart
-                        fig5 = px.bar(df_agg_time_per_stage_avg, x='Estágio', y='Time_in_Stage',
-                                      title='Tempo Médio por Estágio (Filtrado)',
-                                      color='Estágio', # Color by stage
-                                      template='plotly_white', # Use a clean template
-                                      color_discrete_sequence=px.colors.qualitative.Vivid) # Use a different color scale
-                        fig5.update_layout(xaxis_title='Estágio', yaxis_title='Tempo Médio (horas)')
-                        st.plotly_chart(fig5, use_container_width=True)
-
-                    else:
-                         st.info("Nenhum dado disponível para Análise de Tempo Médio por Estágio com os filtros selecionados.")
-                else:
-                    st.info("Dados de timeline não disponíveis.")
-
-        elif page == "Relatório de Oportunidade":
-            # --- Relatório de Oportunidade Individual ---
-            st.title("Relatório de Oportunidade Individual")
-            st.markdown("""
-            Selecione um identificador de Oportunidade (OC + Número ou CTE + Número)
-            para visualizar sua linha do tempo e detalhes.
-            """)
-
-            # Error handling for empty df or df_timeline
-            if df.empty or df_timeline.empty:
-                st.warning("Dados de oportunidade ou linha do tempo não disponíveis. Por favor, verifique a conexão com o Google Sheet.")
-            else:
-                try:
-                    # Use OC_Identifier for selection
-                    opportunity_identifiers = df['OC_Identifier'].dropna().unique()
-
-                    if len(opportunity_identifiers) == 0:
-                        st.info("Nenhum identificador de oportunidade único encontrado nos dados.")
-                    else:
-                        selected_opportunity_identifier = st.selectbox("Selecionar Oportunidade (OC + Número ou CTE + Número):", opportunity_identifiers)
-
-                        st.subheader(f"Detalhes e Linha do Tempo para: {selected_opportunity_identifier}")
-
-                        try:
-                            # Filter main df for the selected opportunity identifier
-                            opportunity_details_df = df[df['OC_Identifier'] == selected_opportunity_identifier]
-
-                            if opportunity_details_df.empty:
-                                st.warning(f"Nenhum detalhe encontrado para: {selected_opportunity_identifier} no DataFrame principal.")
-                            else:
-                                opportunity_details = opportunity_details_df.iloc[0]
-
-                                # Use columns for a structured layout
-                                col_info1, col_info2 = st.columns(2)
-
-                                with col_info1:
-                                    st.write("**ID:**", opportunity_details.get('ID', 'N/A'))
-                                    st.write("**Título:**", opportunity_details.get('Título', 'N/A'))
-                                    st.write("**Responsável:**", opportunity_details.get('Responsável', 'N/A'))
-                                    st.write("**Estado:**", opportunity_details.get('Estado', 'N/A'))
-                                    st.write("**Estágio Atual:**", opportunity_details.get('Estágio', 'N/A'))
-
-                                with col_info2:
-                                    valor_display = "N/A"
-                                    if pd.notna(opportunity_details.get('Valor')) and pd.api.types.is_numeric_dtype(opportunity_details.get('Valor')):
-                                        valor_display = f"R$ {opportunity_details['Valor']:,.2f}"
-                                    st.write("**Valor:**", valor_display)
-
-                                    st.write("**Origem:**", opportunity_details.get('Origem', 'N/A'))
-                                    st.write("**Prob %:**", opportunity_details.get('Prob %', 'N/A'))
-                                    st.write("**OC:**", opportunity_details.get('OC', 'N/A'))
-
-                                st.subheader("Datas Principais")
-                                col_dates1, col_dates2 = st.columns(2)
-                                with col_dates1:
-                                    st.write("**Data de Abertura:**", opportunity_details['Data de abertura'].strftime('%d/%m/%Y %H:%M:%S') if pd.notna(opportunity_details['Data de abertura']) else "N/A")
-                                with col_dates2:
-                                    st.write("**Data de Fechamento:**", opportunity_details['Data fechamento'].strftime('%d/%m/%Y %H:%M:%S') if pd.notna(opportunity_details['Data fechamento']) else "N/A")
-
-                                # Use an expander for Closing Details (if available)
-                                if pd.notna(opportunity_details.get('Data fechamento')):
-                                    with st.expander("Detalhes de Fechamento"):
-                                        valor_fechamento_display = "N/A"
-                                        if pd.notna(opportunity_details.get('Valor fechamento')) and pd.api.types.is_numeric_dtype(opportunity_details.get('Valor fechamento')):
-                                            valor_fechamento_display = f"R$ {opportunity_details['Valor fechamento']:,.2f}"
-                                        st.write("**Valor Fechamento:**", valor_fechamento_display)
-
-                                        valor_rec_fechamento_display = "N/A"
-                                        if pd.notna(opportunity_details.get('Valor rec. fechamento')) and pd.api.types.is_numeric_dtype(opportunity_details.get('Valor rec. fechamento')):
-                                            valor_rec_fechamento_display = f"R$ {opportunity_details['Valor rec. fechamento']:,.2f}"
-                                        st.write("**Valor Rec. Fechamento:**", valor_rec_fechamento_display)
-
-                                        st.write("**Razão de Fechamento:**", opportunity_details.get('Razão de fechamento', 'N/A'))
-                                        st.write("**Observação de Fechamento:**", opportunity_details.get('Observação de fechamento', 'N/A'))
-
-                                try:
-                                    # Filter timeline for the selected opportunity identifier
-                                    opportunity_timeline = df_timeline[df_timeline['OC_Identifier'] == selected_opportunity_identifier].copy()
-
-                                    if not opportunity_timeline.empty:
-                                        st.subheader("Linha do Tempo da Oportunidade")
-
-                                        # --- ABORDAGEM 1: Gráfico de Gantt para Visualização de Cronograma ---
-                                        st.markdown("#### 📊 Gráfico de Gantt - Linha do Tempo dos Estágios")
-                                        
-                                        # Preparar dados para o gráfico de Gantt
-                                        gantt_data = opportunity_timeline.copy()
-                                        gantt_data['Start'] = gantt_data['Data de abertura']
-                                        gantt_data['Finish'] = gantt_data['Data fechamento'].fillna(pd.Timestamp.now())
-                                        gantt_data['Task'] = gantt_data['Estágio']
-                                        gantt_data['Duration_Hours'] = gantt_data['Time_in_Stage']
-                                        
-                                        # Criar gráfico de Gantt
-                                        fig_gantt = px.timeline(
-                                            gantt_data, 
-                                            x_start="Start", 
-                                            x_end="Finish", 
-                                            y="Task",
-                                            title=f"Linha do Tempo - {selected_opportunity_identifier}",
-                                            color="Task",
-                                            color_discrete_sequence=px.colors.qualitative.Set3
-                                        )
-                                        
-                                        fig_gantt.update_layout(
-                                            xaxis_title="Data",
-                                            yaxis_title="Estágio",
-                                            height=400,
-                                            showlegend=True
-                                        )
-                                        
-                                        # Inverter a ordem do eixo Y para melhor visualização
-                                        fig_gantt.update_yaxes(autorange="reversed")
-                                        
-                                        st.plotly_chart(fig_gantt, use_container_width=True)
-
-                                        # --- ABORDAGEM 2: Gráfico de Linha para Evolução Temporal ---
-                                        st.markdown("#### 📈 Evolução Temporal dos Estágios")
-                                        
-                                        # Preparar dados para gráfico de linha
-                                        # Ordenar por data de abertura para sequência correta
-                                        line_data = opportunity_timeline.sort_values('Data de abertura').copy()
-                                        line_data['Sequence'] = range(1, len(line_data) + 1)
-                                        
-                                        fig_line = px.line(
-                                            line_data,
-                                            x='Data de abertura',
-                                            y='Sequence',
-                                            markers=True,
-                                            title=f"Progressão dos Estágios - {selected_opportunity_identifier}",
-                                            color='Estágio',
-                                            color_discrete_sequence=px.colors.qualitative.Bold
-                                        )
-                                        
-                                        # Adicionar anotações para cada estágio
-                                        for idx, row in line_data.iterrows():
-                                            fig_line.add_annotation(
-                                                x=row['Data de abertura'],
-                                                y=row['Sequence'],
-                                                text=row['Estágio'],
-                                                showarrow=True,
-                                                arrowhead=2,
-                                                arrowsize=1,
-                                                arrowwidth=2,
-                                                ax=0,
-                                                ay=-40
-                                            )
-                                        
-                                        fig_line.update_layout(
-                                            xaxis_title="Data",
-                                            yaxis_title="Sequência de Estágios",
-                                            height=400,
-                                            showlegend=False
-                                        )
-                                        
-                                        fig_line.update_yaxes(tickvals=line_data['Sequence'], ticktext=line_data['Estágio'])
-                                        
-                                        st.plotly_chart(fig_line, use_container_width=True)
-
-                                        # --- Gráfico de Barras do Tempo em Cada Estágio ---
-                                        st.markdown("#### ⏱️ Tempo Gasto em Cada Estágio")
-                                        
-                                        # Calcular tempo em horas para cada estágio
-                                        time_per_stage = opportunity_timeline.groupby('Estágio')['Time_in_Stage'].sum().reset_index()
-                                        time_per_stage = time_per_stage.sort_values('Time_in_Stage', ascending=True)
-                                        
-                                        fig_tempo = px.bar(
-                                            time_per_stage,
-                                            x='Time_in_Stage',
-                                            y='Estágio',
-                                            orientation='h',
-                                            title="Tempo Total por Estágio (Horas)",
-                                            color='Estágio',
-                                            color_discrete_sequence=px.colors.qualitative.Pastel,
-                                            text='Time_in_Stage'
-                                        )
-                                        
-                                        # Formatando o texto para mostrar horas de forma legível
-                                        fig_tempo.update_traces(
-                                            texttemplate='%{x:.1f}h',
-                                            textposition='outside'
-                                        )
-                                        
-                                        fig_tempo.update_layout(
-                                            xaxis_title="Tempo Total (Horas)",
-                                            yaxis_title="Estágio",
-                                            height=400,
-                                            showlegend=False
-                                        )
-                                        
-                                        st.plotly_chart(fig_tempo, use_container_width=True)
-
-                                        # --- Tabela Detalhada da Linha do Tempo ---
-                                        st.markdown("#### 📋 Detalhes da Linha do Tempo")
-                                        
-                                        # Preparar dados para exibição
-                                        display_timeline = opportunity_timeline.copy()
-                                        display_timeline['Data de abertura'] = display_timeline['Data de abertura'].dt.strftime('%d/%m/%Y %H:%M')
-                                        display_timeline['Data fechamento'] = display_timeline['Data fechamento'].apply(
-                                            lambda x: x.strftime('%d/%m/%Y %H:%M') if pd.notna(x) else 'Em andamento'
-                                        )
-                                        
-                                        # Calcular duração em formato mais legível
-                                        def format_duration_hours(hours):
-                                            if pd.isna(hours):
-                                                return "N/A"
-                                            days = int(hours // 24)
-                                            remaining_hours = hours % 24
-                                            if days > 0:
-                                                return f"{days}d {remaining_hours:.1f}h"
-                                            else:
-                                                return f"{remaining_hours:.1f}h"
-                                        
-                                        display_timeline['Duração'] = display_timeline['Time_in_Stage'].apply(format_duration_hours)
-                                        
-                                        display_cols = ['Estágio', 'Data de abertura', 'Data fechamento', 'Duração']
-                                        st.dataframe(
-                                            display_timeline[display_cols],
-                                            use_container_width=True,
-                                            hide_index=True
-                                        )
-                                        
-                                    else:
-                                        st.info(f"Nenhum dado de linha do tempo encontrado para: {selected_opportunity_identifier}")
-
-                                except Exception as e:
-                                    st.error(f"Erro ao processar ou exibir dados de linha do tempo para {selected_opportunity_identifier}: {e}")
-
-                                # --- AI Agent Interaction Section ---
-                                st.subheader("Assistente de IA para Oportunidade")
-                                
-                                if st.session_state.get('ai_response') is None:
-                                    st.session_state['ai_response'] = ""
-
-                                if client:
-                                    user_query = st.text_area(f"Faça uma pergunta sobre a oportunidade {selected_opportunity_identifier}:", height=100, key='user_query')
-                                    col_ai_button1, col_ai_button2, col_ai_button3 = st.columns(3)
-
-                                    with col_ai_button1:
-                                        if st.button("Obter Resposta da IA", use_container_width=True):
-                                            if user_query:
-                                                with st.spinner("Obtendo resposta da IA..."):
-                                                    try:
-                                                        # Preparar resumo da linha do tempo para o prompt
-                                                        timeline_summary = ""
-                                                        if not opportunity_timeline.empty:
-                                                            for _, stage in opportunity_timeline.iterrows():
-                                                                start_date = stage['Data de abertura'].strftime('%d/%m/%Y %H:%M')
-                                                                end_date = stage['Data fechamento'].strftime('%d/%m/%Y %H:%M') if pd.notna(stage['Data fechamento']) else 'Em andamento'
-                                                                duration = format_duration_hours(stage['Time_in_Stage'])
-                                                                timeline_summary += f"- {stage['Estágio']}: {start_date} até {end_date} ({duration})\n"
-
-                                                        prompt = f"""
-                                                        Você é um assistente de BI focado em analisar dados de oportunidades de negócios.
-                                                        Sua tarefa é responder a perguntas sobre uma oportunidade específica com base nos dados fornecidos.
-                                                        Seja conciso e útil, focando em insights de BI e na progressão da oportunidade.
-                                                        **Use APENAS os dados fornecidos abaixo.**
-                                                        Se a pergunta do usuário não puder ser respondida com os dados disponíveis, diga isso de forma educada.
-
-                                                        Dados da Oportunidade com identificador {selected_opportunity_identifier}:
-
-                                                        Detalhes Principais:
-                                                        - ID: {opportunity_details.get('ID', 'N/A')}
-                                                        - Título: {opportunity_details.get('Título', 'N/A')}
-                                                        - Responsável: {opportunity_details.get('Responsável', 'N/A')}
-                                                        - Estado: {opportunity_details.get('Estado', 'N/A')}
-                                                        - Estágio Atual: {opportunity_details.get('Estágio', 'N/A')}
-                                                        - Valor: R$ {opportunity_details.get('Valor', 'N/A')}
-                                                        - Origem: {opportunity_details.get('Origem', 'N/A')}
-                                                        - Prob %: {opportunity_details.get('Prob %', 'N/A')}
-                                                        - OC: {opportunity_details.get('OC', 'N/A')}
-                                                        - Data de Abertura: {opportunity_details.get('Data de abertura', 'N/A')}
-                                                        - Data de Fechamento: {opportunity_details.get('Data fechamento', 'N/A')}
-
-                                                        Detalhes de Fechamento (se aplicável):
-                                                        - Valor Fechamento: R$ {opportunity_details.get('Valor fechamento', 'N/A')}
-                                                        - Valor Rec. Fechamento: R$ {opportunity_details.get('Valor rec. fechamento', 'N/A')}
-                                                        - Razão de Fechamento: {opportunity_details.get('Razão de fechamento', 'N/A')}
-                                                        - Observação de Fechamento: {opportunity_details.get('Observação de fechamento', 'N/A')}
-
-                                                        Linha do Tempo (Estágios e Tempos):
-                                                        {timeline_summary}
-
-                                                        Pergunta do Usuário: {user_query}
-
-                                                        Responda em Português do Brasil.
-                                                        """
-
-                                                        response = client.chat.completions.create(
-                                                            model="gpt-4o-mini",
-                                                            messages=[
-                                                                {"role": "system", "content": "Você é um assistente de BI útil e conciso."},
-                                                                {"role": "user", "content": prompt}
-                                                            ],
-                                                            max_tokens=300
-                                                        )
-                                                        st.session_state['ai_response'] = response.choices[0].message.content
-                                                    except Exception as e:
-                                                        st.session_state['ai_response'] = f"Erro ao comunicar com a API da OpenAI: {e}"
-                                            else:
-                                                st.session_state['ai_response'] = "Por favor, digite sua pergunta sobre a oportunidade."
-
-                                    with col_ai_button2:
-                                        if st.button("Limpar Resposta da IA", use_container_width=True):
-                                            st.session_state['ai_response'] = ""
-
-                                    with col_ai_button3:
-                                        # --- BOTÃO PARA EXPORTAR EM PDF ---
-                                        if st.button("📄 Exportar Relatório PDF", use_container_width=True):
-                                            try:
-                                                from fpdf import FPDF
-                                                import base64
-                                                from datetime import datetime
-
-                                                # Criar PDF
-                                                pdf = FPDF()
-                                                pdf.add_page()
-                                                pdf.set_auto_page_break(auto=True, margin=15)
-                                                
-                                                # Configurar fonte
-                                                pdf.set_font("Arial", size=12)
-                                                
-                                                # Título
-                                                pdf.set_font("Arial", 'B', 16)
-                                                pdf.cell(200, 10, f"Relatório da Oportunidade: {selected_opportunity_identifier}", ln=True, align='C')
-                                                pdf.ln(10)
-                                                
-                                                # Detalhes da Oportunidade
-                                                pdf.set_font("Arial", 'B', 14)
-                                                pdf.cell(200, 10, "Detalhes da Oportunidade:", ln=True)
-                                                pdf.set_font("Arial", size=12)
-                                                
-                                                details = [
-                                                    f"ID: {opportunity_details.get('ID', 'N/A')}",
-                                                    f"Título: {opportunity_details.get('Título', 'N/A')}",
-                                                    f"Responsável: {opportunity_details.get('Responsável', 'N/A')}",
-                                                    f"Estado: {opportunity_details.get('Estado', 'N/A')}",
-                                                    f"Estágio Atual: {opportunity_details.get('Estágio', 'N/A')}",
-                                                    f"Valor: {valor_display}",
-                                                    f"Origem: {opportunity_details.get('Origem', 'N/A')}",
-                                                    f"Probabilidade: {opportunity_details.get('Prob %', 'N/A')}%",
-                                                    f"Data de Abertura: {opportunity_details['Data de abertura'].strftime('%d/%m/%Y %H:%M:%S') if pd.notna(opportunity_details['Data de abertura']) else 'N/A'}",
-                                                    f"Data de Fechamento: {opportunity_details['Data fechamento'].strftime('%d/%m/%Y %H:%M:%S') if pd.notna(opportunity_details['Data fechamento']) else 'N/A'}"
-                                                ]
-                                                
-                                                for detail in details:
-                                                    pdf.cell(200, 8, detail, ln=True)
-                                                
-                                                pdf.ln(10)
-                                                
-                                                # Linha do Tempo
-                                                if not opportunity_timeline.empty:
-                                                    pdf.set_font("Arial", 'B', 14)
-                                                    pdf.cell(200, 10, "Linha do Tempo:", ln=True)
-                                                    pdf.set_font("Arial", size=10)
-                                                    
-                                                    # Cabeçalho da tabela
-                                                    pdf.cell(60, 8, "Estágio", border=1)
-                                                    pdf.cell(45, 8, "Data Abertura", border=1)
-                                                    pdf.cell(45, 8, "Data Fechamento", border=1)
-                                                    pdf.cell(40, 8, "Duração", border=1)
-                                                    pdf.ln()
-                                                    
-                                                    # Dados da tabela
-                                                    for _, row in display_timeline.iterrows():
-                                                        pdf.cell(60, 8, str(row['Estágio']), border=1)
-                                                        pdf.cell(45, 8, row['Data de abertura'], border=1)
-                                                        pdf.cell(45, 8, row['Data fechamento'], border=1)
-                                                        pdf.cell(40, 8, str(row['Duração']), border=1)
-                                                        pdf.ln()
-                                                
-                                                pdf.ln(10)
-                                                
-                                                # Resposta da IA (se disponível)
-                                                if st.session_state.get('ai_response'):
-                                                    pdf.set_font("Arial", 'B', 14)
-                                                    pdf.cell(200, 10, "Análise da IA:", ln=True)
-                                                    pdf.set_font("Arial", size=10)
-                                                    
-                                                    # Quebrar texto longo para caber no PDF
-                                                    ai_response = st.session_state['ai_response']
-                                                    lines = []
-                                                    words = ai_response.split(' ')
-                                                    line = ''
-                                                    for word in words:
-                                                        if pdf.get_string_width(line + ' ' + word) < 180:
-                                                            line += ' ' + word
-                                                        else:
-                                                            lines.append(line)
-                                                            line = word
-                                                    lines.append(line)
-                                                    
-                                                    for line in lines:
-                                                        pdf.cell(200, 6, line.strip(), ln=True)
-                                                
-                                                # Data de geração
-                                                pdf.ln(10)
-                                                pdf.set_font("Arial", 'I', 8)
-                                                pdf.cell(200, 8, f"Relatório gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}", ln=True)
-                                                
-                                                # Salvar PDF
-                                                pdf_output = f"relatorio_{selected_opportunity_identifier}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-                                                pdf.output(pdf_output)
-                                                
-                                                # Ler o arquivo e criar link de download
-                                                with open(pdf_output, "rb") as f:
-                                                    pdf_bytes = f.read()
-                                                
-                                                # Codificar para base64
-                                                b64 = base64.b64encode(pdf_bytes).decode()
-                                                
-                                                # Criar link de download
-                                                href = f'<a href="data:application/octet-stream;base64,{b64}" download="{pdf_output}">📥 Clique aqui para baixar o PDF</a>'
-                                                st.markdown(href, unsafe_allow_html=True)
-                                                st.success("PDF gerado com sucesso!")
-                                                
-                                            except Exception as e:
-                                                st.error(f"Erro ao gerar PDF: {e}")
-
-                                    # Display the AI response
-                                    if st.session_state.get('ai_response'):
-                                        st.text_area("Resposta da IA:", value=st.session_state['ai_response'], height=200, disabled=True, key='ai_response_display')
-                                else:
-                                    st.info("O assistente de IA está desabilitado porque a chave da API da OpenAI não foi configurada.")
-
-                        except Exception as e:
-                            st.error(f"Erro ao carregar detalhes da oportunidade {selected_opportunity_identifier}: {e}")
-
-                except Exception as e:
-                    st.error(f"Erro ao processar identificadores de oportunidade: {e}")
-
-except Exception as e:
-    st.error(f"Ocorreu um erro geral na aplicação: {e}")
+                
+                # Filtro por estágio
+                estagios = st.session_state.df['Estágio'].unique()
+                selected_estagios = st.multiselect(
+                    "Estágios",
+                    options=estagios,
+                    default=estagios
+                )
+                
+                # Filtro por responsável
+                if 'Responsável' in st.session_state.df.columns:
+                    responsaveis = st.session_state.df['Responsável'].unique()
+                    selected_responsaveis = st.multiselect(
+                        "Responsáveis",
+                        options=responsaveis,
+                        default=responsaveis
+                    )
+        
+        main_dashboard()
+
+if __name__ == "__main__":
+    main()
