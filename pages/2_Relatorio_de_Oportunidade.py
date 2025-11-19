@@ -24,6 +24,16 @@ def get_openai_client():
 
 def main():
     require_auth()
+    
+    # Botão para atualizar dados
+    st.sidebar.header("Ações")
+    if st.sidebar.button("🔄 Atualizar Dados do Google Sheets", use_container_width=True, type="primary"):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.success("Cache limpo! Os dados serão recarregados.")
+        st.rerun()
+    st.sidebar.divider()
+    
     df, df_timeline = load_datasets()
 
     if df.empty or df_timeline.empty:
@@ -126,4 +136,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

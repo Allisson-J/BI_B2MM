@@ -22,7 +22,15 @@ def render_sidebar():
     st.sidebar.title("Status de Acesso")
     if st.session_state.get("authenticated"):
         st.sidebar.success("Usuário autenticado")
-        if st.sidebar.button("Sair"):
+        st.sidebar.divider()
+        if st.sidebar.button("🔄 Atualizar Dados", use_container_width=True):
+            st.cache_data.clear()
+            st.cache_resource.clear()
+            if "datasets" in st.session_state:
+                del st.session_state["datasets"]
+            st.success("Cache limpo! Os dados serão recarregados.")
+            st.rerun()
+        if st.sidebar.button("Sair", use_container_width=True):
             st.session_state.clear()
             st.rerun()
     else:

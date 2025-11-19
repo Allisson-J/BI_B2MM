@@ -34,6 +34,15 @@ def sidebar_multiselect(label: str, series: pd.Series):
 
 def get_filters(df: pd.DataFrame):
     st.sidebar.header("Filtros do Painel Geral")
+    
+    # Botão para atualizar dados
+    if st.sidebar.button("🔄 Atualizar Dados do Google Sheets", use_container_width=True, type="primary"):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.success("Cache limpo! Os dados serão recarregados.")
+        st.rerun()
+    
+    st.sidebar.divider()
 
     valid_aberturas = df['Data de abertura'].dropna()
     if not valid_aberturas.empty:
@@ -49,40 +58,58 @@ def get_filters(df: pd.DataFrame):
         if isinstance(date_range, tuple) and len(date_range) == 2:
             start_date, end_date = date_range
         else:
-            start_date, end_date = min_date, max_date
+            start_date = end_date = date_range
+        if start_date > end_date:
+            st.sidebar.warning("A data inicial era maior que a final e foi ajustada automaticamente.")
+            start_date, end_date = end_date, start_date
+        start_datetime = pd.to_datetime(start_date)
+        end_datetime = pd.to_datetime(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+        filtered_df = df[
+            (df['Data de abertura'] >= start_datetime)
+            & (df['Data de abertura'] <= end_datetime)
+        ].copy()
     else:
-        start_date, end_date = None, None
-        date_range = None
+        start_datetime = pd.Timestamp("1970-01-01")
+        end_datetime = pd.Timestamp("2100-01-01")
+        filtered_df = df.copy()
 
-    estagios_para_filtrar = sidebar_multiselect("Estágios", df['Estágio'])
-    responsaveis_para_filtrar = sidebar_multiselect("Responsáveis", df['Responsável'])
-    estados_para_filtrar = sidebar_multiselect("Estados", df['Estado'])
+    estados = sidebar_multiselect("Selecionar Estado", filtered_df['Estado'])
+    if estados:
+        filtered_df = filtered_df[filtered_df['Estado'].isin(estados)]
 
-    presentation_step = st.sidebar.radio(
-        "Modo Apresentação",
-        options=[0, 1, 2],
-        format_func=lambda x: ["Desativado", "Destacar Heatmap", "Destacar Tempo Médio"][x],
-        index=0,
+    responsaveis = sidebar_multiselect("Selecionar Responsável", filtered_df['Responsável'])
+    if responsaveis:
+        filtered_df = filtered_df[filtered_df['Responsável'].isin(responsaveis)]
+
+    estagios = sidebar_multiselect("Selecionar Estágio", filtered_df['Estágio'])
+    if estagios:
+        filtered_df = filtered_df[filtered_df['Estágio'].isin(estagios)]
+        estagios_para_filtrar = estagios
+    else:
+        estagios_para_filtrar = filtered_df['Estágio'].dropna().unique().tolist()
+
+    opportunity_identifiers = filtered_df['OC_Identifier'].dropna().unique()
+    selected_oc = st.sidebar.selectbox(
+        "Filtrar por Oportunidade (OC ou CTE)",
+        ["Todos"] + list(opportunity_identifiers),
     )
+    if selected_oc != "Todos":
+        filtered_df = filtered_df[filtered_df['OC_Identifier'] == selected_oc].copy()
 
-    selected_oc = st.sidebar.selectbox("Filtrar por Oportunidade (opcional)", [None] + sorted(df['OC_Identifier'].dropna().unique().tolist()))
+    presentation_mode = st.sidebar.toggle("Modo Apresentação", value=False)
+    presentation_step = 0
+    if presentation_mode and st_autorefresh:
+        counter = st_autorefresh(interval=15000, limit=None, key="presentation_refresh")
+        presentation_step = counter % 3
 
-    filtered_df = df.copy()
-    if start_date and end_date:
-        filtered_df = filtered_df[
-            (filtered_df['Data de abertura'].dt.date >= start_date)
-            & (filtered_df['Data de abertura'].dt.date <= end_date)
-        ]
-    if estagios_para_filtrar:
-        filtered_df = filtered_df[filtered_df['Estágio'].isin(estagios_para_filtrar)]
-    if responsaveis_para_filtrar:
-        filtered_df = filtered_df[filtered_df['Responsável'].isin(responsaveis_para_filtrar)]
-    if estados_para_filtrar:
-        filtered_df = filtered_df[filtered_df['Estado'].isin(estados_para_filtrar)]
-    if selected_oc:
-        filtered_df = filtered_df[filtered_df['OC_Identifier'] == selected_oc]
-
-    return filtered_df, start_date, end_date, estagios_para_filtrar, selected_oc, presentation_step
+    return (
+        filtered_df,
+        start_datetime,
+        end_datetime,
+        estagios_para_filtrar,
+        selected_oc,
+        presentation_step,
+    )
 
 
 def render_kpis(filtered_df: pd.DataFrame):
@@ -175,21 +202,31 @@ def main():
                     x='MonthYear_Abertura',
                     y='Total Oportunidades Únicas',
                     color='Estado',
-                    color_discrete_sequence=px.colors.qualitative.Plotly,
+                    barmode='group',
+                    color_discrete_sequence=px.colors.qualitative.Pastel,
                 )
-                fig2.update_layout(xaxis_title="Mês de Abertura", yaxis_title="Total de Oportunidades Únicas")
+                fig2.update_layout(xaxis_title="Mês/Ano", yaxis_title="Total de Oportunidades Únicas")
                 style_fig(fig2)
                 st.plotly_chart(fig2, use_container_width=True, config=PLOTLY_CONFIG)
             else:
-                st.info("Sem dados para estados/meses dentro dos filtros atuais.")
+                st.info("Sem dados por estado e mês para os filtros atuais.")
 
     with chart_card("Heatmap: Oportunidades por Etapa e Hora de Abertura"):
         if df_timeline.empty:
-            st.info("Sem timeline disponível para gerar o heatmap.")
+            st.info("Timeline indisponível.")
         else:
             df_timeline_filtered = df_timeline[
-                df_timeline['OC_Identifier'].isin(filtered_df['OC_Identifier'].unique())
+                (df_timeline['Data de abertura'] >= start_dt)
+                & (df_timeline['Data de abertura'] <= end_dt)
             ].copy()
+            if estagios_para_filtrar:
+                df_timeline_filtered = df_timeline_filtered[
+                    df_timeline_filtered['Estágio'].isin(estagios_para_filtrar)
+                ].copy()
+            if selected_oc != "Todos":
+                df_timeline_filtered = df_timeline_filtered[
+                    df_timeline_filtered['OC_Identifier'] == selected_oc
+                ].copy()
 
             if df_timeline_filtered.empty:
                 st.info("Sem timeline para os filtros atuais.")
@@ -231,69 +268,55 @@ def main():
     with chart_card("Distribuição de Todos os Estágios (Filtrado)"):
         stage_counts = filtered_df['Estágio'].value_counts().reset_index()
         stage_counts.columns = ['Estágio', 'Quantidade']
-        if not stage_counts.empty:
-            fig3 = px.pie(
-                stage_counts,
-                values='Quantidade',
-                names='Estágio',
-                color_discrete_sequence=px.colors.qualitative.Plotly,
-            )
-            fig3.update_traces(textposition='inside', textinfo='percent+label')
-            style_fig(fig3)
-            st.plotly_chart(fig3, use_container_width=True, config=PLOTLY_CONFIG)
+        if stage_counts.empty:
+            st.info("Sem dados de estágio para os filtros atuais.")
         else:
-            st.info("Sem dados de estágios para os filtros atuais.")
+            fig4 = px.bar(
+                stage_counts,
+                x='Estágio',
+                y='Quantidade',
+                color='Estágio',
+                color_discrete_sequence=px.colors.qualitative.Set3,
+            )
+            fig4.update_layout(xaxis_title="Estágio", yaxis_title="Quantidade")
+            style_fig(fig4)
+            st.plotly_chart(fig4, use_container_width=True, config=PLOTLY_CONFIG)
 
     with chart_card("Análise de Tempo Médio por Estágio (Filtrado)"):
         if df_timeline.empty:
-            st.info("Sem timeline disponível para análise de tempo.")
+            st.info("Timeline indisponível.")
         else:
-            df_timeline_filtered = df_timeline[
-                df_timeline['OC_Identifier'].isin(filtered_df['OC_Identifier'].unique())
+            df_timeline_avg = df_timeline[
+                (df_timeline['Data de abertura'] >= start_dt)
+                & (df_timeline['Data de abertura'] <= end_dt)
             ].copy()
-            if df_timeline_filtered.empty:
-                st.info("Sem timeline para os filtros atuais.")
+            if estagios_para_filtrar:
+                df_timeline_avg = df_timeline_avg[df_timeline_avg['Estágio'].isin(estagios_para_filtrar)].copy()
+            if selected_oc != "Todos":
+                df_timeline_avg = df_timeline_avg[
+                    df_timeline_avg['OC_Identifier'] == selected_oc
+                ].copy()
+
+            if df_timeline_avg.empty:
+                st.info("Sem dados para cálculo de tempo médio.")
             else:
-                df_agg_time_per_stage_avg = (
-                    df_timeline_filtered.groupby('Estágio')['Time_in_Stage']
-                    .mean()
-                    .reset_index()
-                )
-                df_agg_time_per_stage_avg['Tempo no Estágio'] = df_agg_time_per_stage_avg['Time_in_Stage'].apply(
-                    lambda x: f"{int(x // 24)} dias, {int(x % 24)} horas"
-                )
-                st.dataframe(
-                    df_agg_time_per_stage_avg[['Estágio', 'Tempo no Estágio']],
-                    use_container_width=True,
-                    hide_index=True,
+                df_agg_time = df_timeline_avg.groupby('Estágio')['Time_in_Stage'].mean().reset_index()
+                df_agg_time = df_agg_time.sort_values(by='Time_in_Stage', ascending=False)
+                df_agg_time['Tempo Médio no Estágio'] = df_agg_time['Time_in_Stage'].apply(
+                    lambda hours: "N/A"
+                    if pd.isna(hours)
+                    else f"{int(hours // 24)} dias, {int(hours % 24)} horas"
                 )
 
-    with chart_card("Tempo Médio por Estágio Visualização (Filtrado)"):
-        if df_timeline.empty:
-            st.info("Sem timeline disponível para visualização.")
-        else:
-            df_timeline_filtered = df_timeline[
-                df_timeline['OC_Identifier'].isin(filtered_df['OC_Identifier'].unique())
-            ].copy()
-            if df_timeline_filtered.empty:
-                st.info("Sem timeline para os filtros atuais.")
-            else:
-                df_agg_time_per_stage_avg = (
-                    df_timeline_filtered.groupby('Estágio')['Time_in_Stage']
-                    .mean()
-                    .reset_index()
-                )
+                st.dataframe(df_agg_time[['Estágio', 'Tempo Médio no Estágio']])
                 fig5 = px.bar(
-                    df_agg_time_per_stage_avg,
+                    df_agg_time,
                     x='Estágio',
                     y='Time_in_Stage',
                     color='Estágio',
-                    color_discrete_sequence=px.colors.qualitative.Plotly,
+                    color_discrete_sequence=px.colors.qualitative.Vivid,
                 )
-                fig5.update_layout(
-                    xaxis_title="Estágio",
-                    yaxis_title="Tempo Médio (horas)",
-                )
+                fig5.update_layout(xaxis_title='Estágio', yaxis_title='Tempo Médio (horas)')
                 style_fig(fig5)
                 st.plotly_chart(fig5, use_container_width=True, config=PLOTLY_CONFIG)
 
