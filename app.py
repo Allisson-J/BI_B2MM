@@ -122,7 +122,7 @@ def render_home():
                     f"<div class='metric-card'><h3>{label}</h3><p>{value}</p></div>",
                     unsafe_allow_html=True,
                 )
-                                else:
+    else:
         st.info("Os dados serão carregados automaticamente após o primeiro login.")
 
 
@@ -141,4 +141,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
