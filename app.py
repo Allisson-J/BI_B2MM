@@ -25,7 +25,7 @@ def render_sidebar():
         if st.sidebar.button("Sair"):
             st.session_state.clear()
             st.experimental_rerun()
-else:
+    else:
         st.sidebar.info("Realize o login na tela principal.")
 
 
@@ -35,19 +35,19 @@ def render_login(logger):
         "Faça login para liberar os demais módulos do painel (Painel Geral e Relatório de Oportunidade)."
     )
 
-        with st.form("login_form"):
+    with st.form("login_form"):
         username = st.text_input("Usuário")
-            password = st.text_input("Senha", type="password")
+        password = st.text_input("Senha", type="password")
         submit = st.form_submit_button("Entrar")
 
         if submit:
-                if authenticate(username, password):
+            if authenticate(username, password):
                 st.session_state["authenticated"] = True
                 ensure_datasets()
                 logger.info("Login bem-sucedido para %s", username)
                 st.success("Login realizado! Utilize o menu lateral para navegar.")
                 st.experimental_rerun()
-                else:
+            else:
                 logger.warning("Tentativa de login falhou para %s", username)
                 st.error("Credenciais inválidas.")
 
