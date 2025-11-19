@@ -35,13 +35,13 @@ def render_login(logger):
         "Faça login para liberar os demais módulos do painel (Painel Geral e Relatório de Oportunidade)."
     )
 
-        with st.form("login_form"):
+    with st.form("login_form"):
         username = st.text_input("Usuário")
-            password = st.text_input("Senha", type="password")
+        password = st.text_input("Senha", type="password")
         submit = st.form_submit_button("Entrar")
 
         if submit:
-                if authenticate(username, password):
+            if authenticate(username, password):
                 st.session_state["authenticated"] = True
                 ensure_datasets()
                 logger.info("Login bem-sucedido para %s", username)
@@ -122,7 +122,7 @@ def render_home():
                     f"<div class='metric-card'><h3>{label}</h3><p>{value}</p></div>",
                     unsafe_allow_html=True,
                 )
-                        else:
+    else:
         st.info("Os dados serão carregados automaticamente após o primeiro login.")
 
 
@@ -135,7 +135,7 @@ def main():
     if st.session_state.get("authenticated"):
         ensure_datasets()
         render_home()
-                 else:
+    else:
         render_login(logger)
 
 
